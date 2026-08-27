@@ -1,0 +1,40 @@
+
+import { Controller, Post, Body,Res } from '@nestjs/common';
+import type { Response } from 'express';
+import { ChatService } from './chat.service';
+
+@Controller('api')          // 路由前缀为 /api
+export class ChatController {
+  constructor(private readonly chatService: ChatService) {}
+
+  @Post('chat')             // 处理 POST /api/chat
+  async chat(@Body() body: { message: string }) {
+    const answer = await this.chatService.getAIResponse(body.message);
+    return { answer };
+  }
+
+  @Post('chat/stream')
+  async chatStream(@Body() body: { message: string }, @Res() res: Response) {
+    // 设置 SSE 响应头
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.status(200);
+    res.flushHeaders(); // 立即发送响应头
+
+    try {
+      // 调用流式方法，每收到一个文本块就通过 res.write 发送给前端
+      await this.chatService.streamAIResponse(body.message, (chunk) => {
+        res.write(`data: ${JSON.stringify({ content: chunk })}\n\n`);
+      });
+      // 发送完成标记
+      res.write(`data: [DONE]\n\n`);
+      res.end();
+    } catch (error) {
+      // 发送错误信息
+      res.write(`data: ${JSON.stringify({ error: error.message })}\n\n`);
+      res.end();
+    }
+  }
+
+}
