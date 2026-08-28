@@ -2,7 +2,19 @@ import { Injectable } from '@nestjs/common';
 
 @Injectable()
 export class ChatService {
-  private history: any[] = [];
+  private histories = new Map<string, any[]>();//所有会话和用户,ai对话都存这里
+
+//获取某个会话历史 如果没有就创建一个
+private getHistory(conversationId: string): any[] {
+  let history = this.histories.get(conversationId);
+
+  if (!history) {
+    history = [];
+    this.histories.set(conversationId, history);
+  }
+
+  return history;
+}
 
   private async callModel(messages: any[], temperature?: number): Promise<string> {
     // 调用AI模型,给ai模型发请求包 私有方法
@@ -27,38 +39,44 @@ export class ChatService {
     return data.choices[0].message.content;
   }
 
+  //判断是否要压缩上下文 以及把用户每句话放进数组里
+  private async updateHistory(
+    conversationId: string,
+    userMessage: string,
+    assistantResponse: string,
+  ): Promise<void> {
+    const history = this.getHistory(conversationId);
 
-  private async updateHistory(userMessage: string, assistantResponse: string): Promise<void> {
-    //私有方法，处理上下文保存记忆 ai有记忆核心
-    this.history.push({ role: 'user', content: userMessage });
-    this.history.push({ role: 'assistant', content: assistantResponse });
-  
-    if (this.history.length > 20) {
-      const summary = await this.summarizeHistory(this.history);
-      const recentMessages = this.history.slice(-4);
-      this.history = [
+    history.push({ role: 'user', content: userMessage });
+    history.push({ role: 'assistant', content: assistantResponse });
+
+    if (history.length > 20) {
+    const summary = await this.summarizeHistory(history);
+    const recentMessages = history.slice(-4);
+
+    this.histories.set(conversationId, [
         { role: 'system', content: `对话摘要：${summary}` },
-        ...recentMessages
-      ];
-      console.log('（系统已自动压缩历史上下文）');
+      ...recentMessages,
+    ]);
+    console.log('（系统已自动压缩历史上下文）');
     }
   }
   
-
-  async askAI(userMessage: string, history: any[] = this.history): Promise<string> {
-    // 1. 构建消息列表,把用户的消息传进来
+  //组装上下文并请求ai
+  async askAI(
+    conversationId: string,
+    userMessage: string,
+  ): Promise<string> {
+    const history = this.getHistory(conversationId);
     const messages = [
       ...history,
-      { role: 'user', content: userMessage }
+      { role: 'user', content: userMessage },
     ];
-
     return this.callModel(messages);
-
-    
   }
 
   async summarizeHistory(messages: any[]): Promise<string> {
-    //ai上下文摘要判断
+    //仅做一件事压缩上下文,需要时才会被updateHistory调用
     const summaryPrompt = [
       { role: 'system', content: '请总结以下对话的关键信息，包括用户的名字、重要事实、当前目标等。尽量简洁，不超过200字。' },
       ...messages,
@@ -67,25 +85,42 @@ export class ChatService {
     return this.callModel(summaryPrompt, 0.3);
   }
 
-  async getAIResponse(userMessage: string): Promise<string> {
-    //非流式入调用了askAI和summarizeHistory
-    // 1. 调用 AI 获取回复
-    const answer = await this.askAI(userMessage, this.history);
+  //非流式聊天入口
+  async getAIResponse(
+    conversationId: string,
+    userMessage: string,
+  ): Promise<string> {
+    const answer = await this.askAI(conversationId, userMessage);
 
-    await this.updateHistory(userMessage, answer);
-    // 2. 更新历史
-    
+    await this.updateHistory(
+      conversationId,
+      userMessage,
+      answer,
+    );
 
     return answer;
   }
 
-  async streamAIResponse(userMessage: string, onChunk: (chunk: string) => void): Promise<void> {
+  //流式聊天入口
+  async streamAIResponse(
+    conversationId: string,
+    userMessage: string,
+    onChunk: (chunk: string) => void,
+  ): Promise<void> {
     //流式输出 主要前端输出手段
     // 构造消息数组：历史消息 + 当前用户消息
-    console.log('streamAIResponse 被调用，用户消息:', userMessage);
+    console.log(
+      'streamAIResponse 被调用，会话 ID:',
+      conversationId,
+      '用户消息:',
+      userMessage,
+    );
+
+    const history = this.getHistory(conversationId);
+
     const messages = [
-      ...this.history,
-      { role: 'user', content: userMessage }
+      ...history,
+      { role: 'user', content: userMessage },
     ];
   
     // 调用大模型 API，开启流式
@@ -148,7 +183,11 @@ export class ChatService {
         }
       }
     }
-    await this.updateHistory(userMessage, fullAnswer);  // 使用公共方法
+    await this.updateHistory(
+      conversationId,
+      userMessage,
+      fullAnswer,
+    );  // 使用公共方法
     
   }
 

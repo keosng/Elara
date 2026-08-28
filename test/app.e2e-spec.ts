@@ -28,7 +28,10 @@ describe('AppController (e2e)', () => {
   it('/api/chat (POST) 应该返回 AI 回复', () => {
     return request(app.getHttpServer())
       .post('/api/chat')
-      .send({ message: '你好' })
+      .send({
+        conversationId: 'conversation-a',
+        message: '你好',
+      })
       .expect(201)
       .expect({ answer: '这是测试回答' });
   });
