@@ -1,5 +1,5 @@
 
-import { Controller, Post, Body,Res } from '@nestjs/common';
+import { Controller, Post, Delete, Body, Param, Res } from '@nestjs/common';
 import type { Response } from 'express';
 import { ChatService } from './chat.service';
 
@@ -36,6 +36,13 @@ export class ChatController {
         (chunk) => {
           res.write(`data: ${JSON.stringify({ content: chunk })}\n\n`);
       },
+      (message) => {
+        res.write(`data: ${JSON.stringify({
+          type: 'system',
+          message,
+        })}\n\n`
+        );
+      },
     );
       // 发送完成标记
       res.write(`data: [DONE]\n\n`);
@@ -46,5 +53,14 @@ export class ChatController {
       res.end();
     }
   }
+
+  @Delete('chat/:conversationId')
+deleteChatHistory(
+  @Param('conversationId') conversationId: string,
+) {
+  const deleted = this.chatService.deleteHistory(conversationId);
+
+  return { deleted };
+}
 
 }

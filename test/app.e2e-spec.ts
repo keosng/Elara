@@ -9,9 +9,13 @@ describe('AppController (e2e)', () => {
   let app: INestApplication<App>;
   const mockChatService = {
     getAIResponse: jest.fn(),
+    deleteHistory: jest.fn(),
   };
 
   beforeEach(async () => {
+    mockChatService.getAIResponse.mockReset();
+    mockChatService.deleteHistory.mockReset();
+
     mockChatService.getAIResponse.mockResolvedValue('这是测试回答');
 
     const moduleFixture: TestingModule = await Test.createTestingModule({
@@ -34,6 +38,19 @@ describe('AppController (e2e)', () => {
       })
       .expect(201)
       .expect({ answer: '这是测试回答' });
+  });
+
+  it('/api/chat/:conversationId (DELETE) 应该删除会话历史', async () => {
+    mockChatService.deleteHistory.mockReturnValue(true);
+
+    await request(app.getHttpServer())
+      .delete('/api/chat/conversation-a')
+      .expect(200)
+      .expect({ deleted: true });
+
+    expect(mockChatService.deleteHistory).toHaveBeenCalledWith(
+      'conversation-a',
+    );
   });
 
   afterEach(async () => {

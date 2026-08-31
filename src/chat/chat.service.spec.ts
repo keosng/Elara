@@ -69,4 +69,54 @@ describe('ChatService', () => {
       { role: 'user', content: '你还记得我吗？' },
     ]);
   });
+
+  it('删除会话历史后，该会话会从空历史开始', async () => {
+    const createResponse = (content: string) =>
+      ({
+        ok: true,
+        json: async () => ({
+          choices: [
+            {
+              message: {
+                content,
+              },
+            },
+          ],
+        }),
+      }) as Response;
+
+    fetchMock
+      .mockResolvedValueOnce(createResponse('第一次回答'))
+      .mockResolvedValueOnce(createResponse('删除后回答'));
+
+    await service.getAIResponse(
+      'conversation-delete',
+      '第一句话',
+    );
+
+    const deleted = service.deleteHistory('conversation-delete');
+
+    const answer = await service.getAIResponse(
+      'conversation-delete',
+      '删除后重新开始',
+    );
+
+    const secondRequest = fetchMock.mock.calls[1][1];
+    const requestBody = JSON.parse(secondRequest?.body as string);
+
+    expect(deleted).toBe(true);
+    expect(answer).toBe('删除后回答');
+    expect(requestBody.messages).toEqual([
+      {
+        role: 'user',
+        content: '删除后重新开始',
+      },
+    ]);
+  });
+
+  it('删除不存在的会话时返回 false', () => {
+    const deleted = service.deleteHistory('conversation-not-found');
+
+    expect(deleted).toBe(false);
+  });
 });

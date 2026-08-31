@@ -8,25 +8,396 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <h1>AI 对话</h1>
-  <div id="messages"></div>
-  <div class="composer">
-    <input type="text" id="userInput" placeholder="输入消息...">
-    <button onclick="sendMessage()">发送</button>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="会话导航">
+      <div class="brand-lockup">
+        <p class="brand-kicker">夜色书页</p>
+        <h2 class="brand-title">会话书签</h2>
+      </div>
+
+      <button class="new-conversation" id="newConversationButton" type="button">
+        新建会话
+      </button>
+
+      <section class="history-section" aria-labelledby="historyHeading">
+        <div class="history-heading">
+          <p class="section-label" id="historyHeading">会话记录</p>
+          <span class="conversation-count" id="conversationCount">0</span>
+        </div>
+        <div class="conversation-list" id="conversationList"></div>
+        <p class="empty-conversations" id="emptyConversations" hidden>还没有会话记录。</p>
+      </section>
+    </aside>
+
+    <main class="chat-panel">
+      <header class="chat-header">
+        <div>
+          <p class="chat-kicker">一盏留给夜行者的灯</p>
+          <h1>AI 对话</h1>
+        </div>
+        <div class="chat-status" aria-label="当前会话状态">
+          <span class="status-dot" aria-hidden="true"></span>
+          当前会话
+        </div>
+      </header>
+
+      <div id="messages" aria-live="polite"></div>
+
+      <div class="composer">
+        <input type="text" id="userInput" placeholder="输入消息..." autocomplete="off">
+        <button class="send-button" id="sendButton" type="button">发送</button>
+      </div>
+    </main>
   </div>
 
+  <dialog class="delete-dialog" id="deleteDialog" aria-labelledby="deleteDialogTitle" aria-describedby="deleteDialogMessage">
+    <div class="delete-dialog-content">
+      <p class="dialog-kicker">会话书签</p>
+      <h2 class="dialog-title" id="deleteDialogTitle">要撕下这张书签吗？</h2>
+      <p class="dialog-message" id="deleteDialogMessage">
+        确定要删除“<span id="deleteConversationTitle"></span>”吗？删除后这段本地记录将无法恢复。
+      </p>
+      <div class="dialog-actions">
+        <button class="dialog-cancel" id="cancelDeleteButton" type="button">暂时保留</button>
+        <button class="dialog-confirm" id="confirmDeleteButton" type="button">确认删除</button>
+      </div>
+    </div>
+  </dialog>
+
   <script>
+    const CONVERSATIONS_KEY = 'fairytale-ai-conversations';
+    const ACTIVE_CONVERSATION_KEY = 'fairytale-ai-active-conversation';
+    const messagesDiv = document.getElementById('messages');
+    const input = document.getElementById('userInput');
+    const sendButton = document.getElementById('sendButton');
+    const newConversationButton = document.getElementById('newConversationButton');
+    const conversationList = document.getElementById('conversationList');
+    const conversationCount = document.getElementById('conversationCount');
+    const emptyConversations = document.getElementById('emptyConversations');
+    const deleteDialog = document.getElementById('deleteDialog');
+    const deleteConversationTitle = document.getElementById('deleteConversationTitle');
+    const cancelDeleteButton = document.getElementById('cancelDeleteButton');
+    const confirmDeleteButton = document.getElementById('confirmDeleteButton');
+
+    let conversations = loadConversations();
+    let activeConversationId = localStorage.getItem(ACTIVE_CONVERSATION_KEY);
+    let isSending = false;
+    let pendingDeleteConversationId = null;
+    let deleteDialogReturnFocus = null;
+
+    if (!activeConversationId || !conversations.some((item) => item.id === activeConversationId)) {
+      const firstConversation = createConversation();
+      conversations.unshift(firstConversation);
+      activeConversationId = firstConversation.id;
+      saveState();
+    }
+
+    renderConversationList();
+    renderActiveConversation();
+
+    sendButton.addEventListener('click', sendMessage);
+    newConversationButton.addEventListener('click', createNewConversation);
+    cancelDeleteButton.addEventListener('click', closeDeleteDialog);
+    confirmDeleteButton.addEventListener('click', confirmDeleteConversation);
+    deleteDialog.addEventListener('cancel', (event) => {
+      event.preventDefault();
+      closeDeleteDialog();
+    });
+    deleteDialog.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeDeleteDialog();
+      }
+    });
+    deleteDialog.addEventListener('click', (event) => {
+      if (event.target === deleteDialog) {
+        closeDeleteDialog();
+      }
+    });
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        sendMessage();
+      }
+    });
+
+    function createId() {
+      if (window.crypto && window.crypto.randomUUID) {
+        return window.crypto.randomUUID();
+      }
+
+      return `conversation-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    }
+
+    function createConversation() {
+      return {
+        id: createId(),
+        title: '新会话',
+        updatedAt: Date.now(),
+        messages: [],
+      };
+    }
+
+    function loadConversations() {
+      try {
+        const saved = localStorage.getItem(CONVERSATIONS_KEY);
+        const parsed = saved ? JSON.parse(saved) : [];
+
+        if (!Array.isArray(parsed)) return [];
+
+        return parsed
+          .filter((item) => item && typeof item.id === 'string')
+          .map((item) => ({
+            id: item.id,
+            title: typeof item.title === 'string' ? item.title : '新会话',
+            updatedAt: Number(item.updatedAt) || Date.now(),
+            messages: Array.isArray(item.messages)
+              ? item.messages.filter(
+                  (message) =>
+                    message &&
+                    (message.role === 'user' ||
+                      message.role === 'assistant' ||
+                      message.role === 'system') &&
+                    typeof message.text === 'string',
+                )
+              : [],
+          }));
+      } catch (error) {
+        return [];
+      }
+    }
+
+    function saveState() {
+      try {
+        localStorage.setItem(CONVERSATIONS_KEY, JSON.stringify(conversations));
+        localStorage.setItem(ACTIVE_CONVERSATION_KEY, activeConversationId);
+      } catch (error) {
+        // 本地存储不可用时，当前页面仍可继续聊天
+      }
+    }
+
+    function getConversation(conversationId = activeConversationId) {
+      return conversations.find((conversation) => conversation.id === conversationId);
+    }
+
+    function formatTime(timestamp) {
+      const date = new Date(timestamp);
+      const now = new Date();
+
+      if (
+        date.getFullYear() === now.getFullYear() &&
+        date.getMonth() === now.getMonth() &&
+        date.getDate() === now.getDate()
+      ) {
+        return date.toLocaleTimeString('zh-CN', {
+          hour: '2-digit',
+          minute: '2-digit',
+        });
+      }
+
+      return `${String(date.getMonth() + 1).padStart(2, '0')}/${String(date.getDate()).padStart(2, '0')}`;
+    }
+
+    function renderConversationList() {
+      conversationList.replaceChildren();
+      conversationCount.textContent = String(conversations.length);
+      emptyConversations.hidden = conversations.length > 0;
+
+      conversations
+        .slice()
+        .sort((a, b) => b.updatedAt - a.updatedAt)
+        .forEach((conversation) => {
+          const item = document.createElement('div');
+          item.className = 'conversation-item';
+
+          const selectButton = document.createElement('button');
+          selectButton.type = 'button';
+          selectButton.className = 'conversation-select';
+          selectButton.classList.toggle('is-active', conversation.id === activeConversationId);
+          selectButton.disabled = isSending;
+          selectButton.setAttribute('aria-pressed', String(conversation.id === activeConversationId));
+          selectButton.innerHTML = `
+            <span class="conversation-copy">
+              <span class="conversation-title"></span>
+              <span class="conversation-meta"></span>
+            </span>
+          `;
+          selectButton.querySelector('.conversation-title').textContent = conversation.title;
+          selectButton.querySelector('.conversation-meta').textContent = formatTime(conversation.updatedAt);
+          selectButton.addEventListener('click', () => selectConversation(conversation.id));
+
+          const deleteButton = document.createElement('button');
+          deleteButton.type = 'button';
+          deleteButton.className = 'conversation-delete';
+          deleteButton.textContent = '删除';
+          deleteButton.title = '删除会话';
+          deleteButton.setAttribute('aria-label', `删除会话：${conversation.title}`);
+          deleteButton.disabled = isSending;
+          deleteButton.addEventListener('click', () => deleteConversation(conversation.id));
+
+          item.append(selectButton, deleteButton);
+          conversationList.appendChild(item);
+        });
+    }
+
+    function renderActiveConversation() {
+      const conversation = getConversation();
+      messagesDiv.replaceChildren();
+
+      if (!conversation) return;
+
+      conversation.messages.forEach((message) => {
+        const messageClass = message.role === 'system' ? 'system-message' : message.role;
+        addMessage(messageClass, message.text, false);
+      });
+
+      messagesDiv.scrollTop = messagesDiv.scrollHeight;
+    }
+
+    function selectConversation(conversationId) {
+      if (isSending || conversationId === activeConversationId) return;
+
+      activeConversationId = conversationId;
+      saveState();
+      renderConversationList();
+      renderActiveConversation();
+      input.focus();
+    }
+
+    function createNewConversation() {
+      if (isSending) return;
+
+      const conversation = createConversation();
+      conversations.unshift(conversation);
+      activeConversationId = conversation.id;
+      saveState();
+      renderConversationList();
+      renderActiveConversation();
+      input.focus();
+    }
+
+    function deleteConversation(conversationId) {
+      if (isSending) return;
+
+      const conversation = getConversation(conversationId);
+      if (!conversation) return;
+
+      pendingDeleteConversationId = conversationId;
+      deleteDialogReturnFocus = document.activeElement;
+      deleteConversationTitle.textContent = conversation.title;
+      deleteDialog.showModal();
+    }
+
+    function closeDeleteDialog() {
+      if (!deleteDialog.open || deleteDialog.classList.contains('is-closing')) return;
+
+      deleteDialog.classList.add('is-closing');
+      window.setTimeout(() => {
+        deleteDialog.classList.remove('is-closing');
+        deleteDialog.close();
+        pendingDeleteConversationId = null;
+        if (deleteDialogReturnFocus instanceof HTMLElement) {
+          deleteDialogReturnFocus.focus();
+        }
+        deleteDialogReturnFocus = null;
+      }, 160);
+    }
+
+    function confirmDeleteConversation() {
+      const conversationId = pendingDeleteConversationId;
+      if (!conversationId) return;
+
+      closeDeleteDialog();
+      window.setTimeout(() => performDeleteConversation(conversationId), 160);
+    }
+
+    async function performDeleteConversation(conversationId) {
+      const conversation = getConversation(conversationId);
+      if (!conversation) return;
+
+      try {
+        const response = await fetch(
+          `/api/chat/${encodeURIComponent(conversationId)}`,
+          {
+            method: 'DELETE',
+          },
+        );
+
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+      } catch (error) {
+        console.error('删除会话失败：', error);
+        return;
+      }
+
+      conversations = conversations.filter((item) => item.id !== conversationId);
+
+      if (conversations.length === 0) {
+        const replacement = createConversation();
+        conversations.push(replacement);
+        activeConversationId = replacement.id;
+      } else if (conversationId === activeConversationId) {
+        activeConversationId = conversations[0].id;
+      }
+
+      saveState();
+      renderConversationList();
+      renderActiveConversation();
+      input.focus();
+    }
+
+    function recordUserMessage(conversationId, text) {
+      const conversation = getConversation(conversationId);
+      if (!conversation) return;
+
+      conversation.messages.push({ role: 'user', text });
+      if (conversation.title === '新会话') {
+        conversation.title = text.length > 28 ? `${text.slice(0, 28)}...` : text;
+      }
+      conversation.updatedAt = Date.now();
+      saveState();
+      renderConversationList();
+    }
+
+    function recordAssistantMessage(conversationId, text) {
+      const conversation = getConversation(conversationId);
+      if (!conversation || !text) return;
+
+      conversation.messages.push({ role: 'assistant', text });
+      conversation.updatedAt = Date.now();
+      saveState();
+      renderConversationList();
+    }
+
+    function recordSystemMessage(conversationId, text) {
+      const conversation = getConversation(conversationId);
+      if (!conversation || !text) return;
+
+      conversation.messages.push({ role: 'system', text });
+      saveState();
+    }
+
+    function setSendingState(sending) {
+      isSending = sending;
+      input.disabled = sending;
+      sendButton.disabled = sending;
+      newConversationButton.disabled = sending;
+      renderConversationList();
+    }
+
     async function sendMessage() {
-      const input = document.getElementById('userInput');
       const message = input.value.trim();
-      if (!message) return;
+      if (!message || isSending) return;
+
+      const conversationId = activeConversationId;
+      setSendingState(true);
 
       // 显示用户消息
       addMessage('user', message);
+      recordUserMessage(conversationId, message);
       input.value = '';
 
       // 创建一个 AI 消息容器
-      const messagesDiv = document.getElementById('messages');
       const aiMsgDiv = document.createElement('div');
       aiMsgDiv.className = 'assistant';
       aiMsgDiv.textContent = 'AI 正在思考';
@@ -39,7 +410,10 @@
         const response = await fetch('/api/chat/stream', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message })
+          body: JSON.stringify({
+            conversationId,
+            message,
+          }),
         });
         if (!response.ok) {
           throw new Error(`HTTP ${response.status}`);
@@ -50,6 +424,8 @@
         let buffer = '';
         let pendingText = '';
         let displayedText = '';
+        let receivedText = '';
+        const receivedSystemMessages = [];
         let typing = false;
         let thinkingDots = 0;
         thinkingTimer = setInterval(() => {
@@ -101,8 +477,15 @@
 
             try {
               const json = JSON.parse(data);
+              if (json.type === 'system' && json.message) {
+                addMessage('system-message', json.message);
+                receivedSystemMessages.push(json.message);
+                continue;
+              }
+
               if (json.content) {
                 pendingText += json.content;
+                receivedText += json.content;
                 if (!typing) {
                   flushTyping();
                 }
@@ -119,22 +502,30 @@
         if (displayedText.length > 0) {
           clearInterval(thinkingTimer);
         }
+        recordAssistantMessage(conversationId, receivedText);
+        receivedSystemMessages.forEach((systemMessage) => {
+          recordSystemMessage(conversationId, systemMessage);
+        });
       } catch (error) {
         if (thinkingTimer) {
           clearInterval(thinkingTimer);
         }
         aiMsgDiv.classList.remove('thinking');
         aiMsgDiv.textContent = '网络错误：' + error.message;
+      } finally {
+        setSendingState(false);
+        input.focus();
       }
     }
 
-    function addMessage(role, text) {
-      const messagesDiv = document.getElementById('messages');
+    function addMessage(role, text, shouldScroll = true) {
       const msgDiv = document.createElement('div');
       msgDiv.className = role;
       msgDiv.textContent = text;
       messagesDiv.appendChild(msgDiv);
-      messagesDiv.scrollTop = messagesDiv.scrollHeight;
+      if (shouldScroll) {
+        messagesDiv.scrollTop = messagesDiv.scrollHeight;
+      }
     }
   </script>
 </body>

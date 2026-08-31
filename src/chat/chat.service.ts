@@ -15,6 +15,10 @@ private getHistory(conversationId: string): any[] {
 
   return history;
 }
+//删除一个传进来的指定的会话
+deleteHistory(conversationId: string): boolean {
+  return this.histories.delete(conversationId);
+}
 
   private async callModel(messages: any[], temperature?: number): Promise<string> {
     // 调用AI模型,给ai模型发请求包 私有方法
@@ -44,6 +48,7 @@ private getHistory(conversationId: string): any[] {
     conversationId: string,
     userMessage: string,
     assistantResponse: string,
+    onSystemMessage?: (message: string) => void,
   ): Promise<void> {
     const history = this.getHistory(conversationId);
 
@@ -58,7 +63,10 @@ private getHistory(conversationId: string): any[] {
         { role: 'system', content: `对话摘要：${summary}` },
       ...recentMessages,
     ]);
-    console.log('（系统已自动压缩历史上下文）');
+    const systemMessage = '（系统已自动压缩历史上下文）';
+
+    console.log(systemMessage);
+    onSystemMessage?.(systemMessage);
     }
   }
   
@@ -106,6 +114,7 @@ private getHistory(conversationId: string): any[] {
     conversationId: string,
     userMessage: string,
     onChunk: (chunk: string) => void,
+    onSystemMessage?: (message: string) => void,
   ): Promise<void> {
     //流式输出 主要前端输出手段
     // 构造消息数组：历史消息 + 当前用户消息
@@ -187,6 +196,7 @@ private getHistory(conversationId: string): any[] {
       conversationId,
       userMessage,
       fullAnswer,
+      onSystemMessage,
     );  // 使用公共方法
     
   }
