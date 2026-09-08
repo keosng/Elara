@@ -3,9 +3,14 @@
 import { Module } from '@nestjs/common';
 import { ChatController } from './chat.controller';
 import { ChatService } from './chat.service';
+import { PrismaModule } from '../prisma/prisma.module';
 
 @Module({
+  //这个部门需要其他哪些部门
+  imports: [PrismaModule],
+  //这个部门对外接收哪些请求
   controllers: [ChatController],
+  //这个部门内部有哪些可注入的工作人员
   providers: [ChatService],
 })
 export class ChatModule {}

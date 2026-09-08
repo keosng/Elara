@@ -1,0 +1,1486 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#171518">
+  <title>夜行走廊 · Three.js 原型</title>
+  <link rel="stylesheet" href="corridor-demo.css">
+</head>
+<body>
+  <main class="corridor-stage">
+    <canvas id="corridorCanvas" aria-label="可漫游的手绘风格 3D 走廊"></canvas>
+
+    <div class="scene-heading" aria-hidden="true">
+      <span>Sketching the Impossible</span>
+      <strong>夜行走廊</strong>
+    </div>
+
+    <div class="scene-status" aria-live="polite">
+      <span class="status-mark"></span>
+      <span id="segmentReadout">走廊模块 01</span>
+    </div>
+
+    <a class="return-link" href="/">返回聊天</a>
+  </main>
+
+  <script type="module">
+  /*
+   * ============================================================================
+   *  夜行走廊 · 主场景
+   * ============================================================================
+   *  整体流程：
+   *    常量 → 渲染器/场景 → 材质工厂 → 共享材质库 → 运行时状态
+   *    → 构件工厂 → 段落池 → 交互事件 → 每帧更新 → 启动
+   *
+   *  核心概念（面试/维护时最需要解释的三件事）：
+   *    1. 双贴图混合：每个表面都同时挂「线稿图」和「上色图」两张贴图，
+   *       片元着色器里按 reveal 值在两者之间插值，实现「上色」动画。
+   *    2. 统一光圈中心：所有材质共用同一个世界坐标中心点 uRevealCenter，
+   *       由一次 raycast 求出。不对单个物体做判定，所以跨表面接缝不会断裂。
+   *    3. 场景色进度：sceneColorProgress 是全局叙事进度（0=线稿，1=全彩），
+   *       由好感度系统驱动，优先级高于鼠标光圈（max 取值）。
+   * ============================================================================
+   */
+
+  import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.182.0/build/three.module.js';
+  import { createTableFactory } from './corridor-table.js';
+
+  /* ==========================================================================
+   * 1. 依赖导入
+   * ========================================================================== */
+
+  /* ==========================================================================
+   * 2. 场景尺寸与布局常量
+   *    走廊由若干个「段落（segment）」沿 -Z 方向拼接而成，
+   *    相机向前移动时通过对象池循环复用这 5 个段落，实现无限走廊。
+   * ========================================================================== */
+
+  /** 走廊宽度（世界单位，X 方向），墙面位于 x = ±5 */
+  const WIDTH = 10;
+  /** 走廊净高（Y 方向） */
+  const HEIGHT = 6;
+  /** 单个走廊段落的长度（Z 方向） */
+  const SEGMENT_LENGTH = 18;
+  /** 段落对象池大小：同时只有这么多段落在场，随相机前进循环复用 */
+  const SEGMENT_POOL_SIZE = 5;
+  /** 相机前方保留的段落数（含当前段），决定视野内渲染多少段 */
+  const SEGMENT_LOOKAHEAD = 2;
+
+  /* --- 墙面 --- */
+
+  /**
+   * 墙面外张角度（弧度）。
+   * 当前为 0：墙面严格垂直于地板，保证墙/墙裙/地板的接缝连续。
+   * 若改成非 0，接缝处会出现错位，光圈也会在墙脚断裂。
+   */
+  const WALL_SPLAY = 0;
+  /** 门洞整体向走廊内侧的缩进量，避免门与墙面共面导致 z-fighting */
+  const DOOR_WALL_INSET = 0.055;
+
+  /* --- 墙裙（墙面下部的深色护墙板）--- */
+
+  /** 墙裙平面高度 */
+  const WALL_SKIRT_HEIGHT = 2.35;
+  /** 墙裙整体的垂直偏移（负数 = 向下压），用于对齐手绘稿的视觉重心 */
+  const WALL_SKIRT_VERTICAL_OFFSET = -0.16;
+  /** 墙裙向走廊内侧的缩进量，避免与墙面共面导致 z-fighting（关键 anti-flicker 值） */
+  const WALL_SKIRT_FLOOR_INSET = 0.018;
+  /** 墙裙在世界坐标中的 X 位置（左右对称，± 该值） */
+  const WALL_SKIRT_WORLD_X = WIDTH / 2 - WALL_SKIRT_FLOOR_INSET;
+
+  /* --- 顶角线（墙与天花板的交界装饰条）--- */
+
+  /** 顶角线平面高度 */
+  const TOP_TRIM_PLANE_HEIGHT = 0.9;
+  /** 顶角线的垂直微调，让装饰条贴住墙顶 */
+  const TOP_TRIM_VERTICAL_OFFSET = 0.08;
+  /** 顶角线向走廊内侧的缩进量，同样用于避免 z-fighting */
+  const TOP_TRIM_WALL_INSET = 0.014;
+
+  /* --- 壁灯 --- */
+
+  /** 壁灯贴片宽度 */
+  const LAMP_WIDTH = 1.38;
+  /** 壁灯贴片高度 */
+  const LAMP_HEIGHT = 2.25;
+  /** 壁灯底边离地高度 */
+  const LAMP_BOTTOM_Y = 2.45;
+  /**
+   * 壁灯向走廊内侧的偏转角度（弧度），约 20°。
+   * 让手绘灯的正面朝向相机保持可读，同时保留一点透视变化。
+   */
+  const LAMP_FACE_ANGLE = Math.PI / 9;
+  /** 壁灯厚度方向的层次偏移，用于叠出「正面 + 背衬」两层，制造立体感 */
+  const LAMP_DEPTH = 0.28;
+  /**
+   * 壁灯与门之间沿 Z 轴的距离。
+   * 门的贴画在 Z 方向占了好几个世界单位，壁灯必须错开，
+   * 否则会被门的半透明像素遮挡。
+   */
+  const LAMP_DOOR_Z_OFFSET = 4.35;
+
+  /* ==========================================================================
+   * 3. 视觉与调试开关
+   * ========================================================================== */
+
+  /**
+   * 全彩预览开关。
+   * true = 整个走廊直接处于上色状态，方便调美术；
+   * false = 回到线稿起点，等待好感度系统驱动。
+   * 接入好感度之前请保持 false。
+   */
+  const PREVIEW_FULL_COLOR = false;
+
+  /** 门的「上色」动画时长（秒） */
+  const DOOR_REVEAL_DURATION = 0.3;
+  /** 相机向前推进的最远距离（负值越大越远），防止无限后退出现精度问题 */
+  const CAMERA_MIN_Z = -100000;
+  /** 用户是否开启了系统的「减少动态效果」无障碍选项 */
+  const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  /* ==========================================================================
+   * 4. 渲染器 / 场景 / 相机
+   * ========================================================================== */
+
+  /** 画布元素 */
+  const canvas = document.getElementById('corridorCanvas');
+  /** 右下角的「走廊模块 XX」文字节点 */
+  const segmentReadout = document.getElementById('segmentReadout');
+
+  /** WebGL 渲染器。像素比上限 2，避免高 DPI 屏幕上性能翻车 */
+  const renderer = new THREE.WebGLRenderer({
+    canvas,
+    antialias: true,
+    powerPreference: 'high-performance',
+  });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+  /** 三维场景。背景与雾同为白色，远处段落自然淡出，省去远处几何体的突兀边缘 */
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color('#ffffff');
+  scene.fog = new THREE.Fog('#ffffff', 12, 68);
+
+  /** 透视相机：FOV 68，近裁剪 0.1，远裁剪 180 */
+  const camera = new THREE.PerspectiveCamera(68, 1, 0.1, 180);
+  camera.position.set(0, 2.35, 5.5);
+
+  /** 走廊根节点，所有段落都挂在这个 Group 下 */
+  const corridor = new THREE.Group();
+  scene.add(corridor);
+
+  /* ==========================================================================
+   * 5. 通用工具函数
+   * ========================================================================== */
+
+  /**
+   * 可复现的伪随机数生成器（LCG）。
+   * 用字符串种子产生确定序列，保证每次刷新生成的纹理完全一致。
+   * @param {string} seed 种子字符串
+   * @returns {() => number} 返回 [0,1) 区间的随机数函数
+   */
+  function seededRandom(seed) {
+    let value = [...seed].reduce((total, character) => total + character.charCodeAt(0), 0);
+    return () => {
+      value = (value * 9301 + 49297) % 233280;
+      return value / 233280;
+    };
+  }
+
+  /**
+   * 加载一张图片纹理并配置重复/色彩空间。
+   * @param {string} path 图片路径
+   * @param {number} repeatX X 方向重复次数
+   * @param {number} repeatY Y 方向重复次数
+   * @param {string} label 中文名，仅用于加载失败时的警告信息
+   * @returns {THREE.Texture}
+   */
+  function loadImageTexture(path, repeatX, repeatY, label) {
+    const texture = new THREE.TextureLoader().load(
+      path,
+      undefined,
+      undefined,
+      () => console.warn(`${label}纹理加载失败：${path}`),
+    );
+    texture.wrapS = THREE.RepeatWrapping;
+    texture.wrapT = THREE.RepeatWrapping;
+    texture.colorSpace = THREE.SRGBColorSpace;
+    // 各向异性过滤：斜着看地板/墙面时纹理不会糊
+    texture.anisotropy = renderer.capabilities.getMaxAnisotropy();
+    texture.repeat.set(repeatX, repeatY);
+    return texture;
+  }
+
+  /** 地板专用：沿走廊方向重复 4 次，横向 1.2 次 */
+  function loadFloorTexture(path) {
+    return loadImageTexture(path, 1.2, 4, '地板');
+  }
+
+  /* ==========================================================================
+   * 6. 可复用的 GLSL 片段
+   *    把重复的着色器代码抽成常量，避免每个材质各写一遍（原先四处几乎雷同）
+   * ========================================================================== */
+
+  /**
+   * 顶点着色器：输出 UV 与世界坐标。
+   * 世界坐标是光圈计算的基础——所有表面必须在同一坐标系里量距离，
+   * 光圈才能跨物体连续。
+   */
+  const VERTEX_WORLD = `
+    varying vec2 vUv;
+    varying vec3 vWorldPosition;
+
+    void main() {
+      vUv = uv;
+      vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+      vWorldPosition = worldPosition.xyz;
+      gl_Position = projectionMatrix * viewMatrix * worldPosition;
+    }
+  `;
+
+  /**
+   * 片元着色器公共函数：计算某个世界坐标点的「上色程度」。
+   *
+   * 两个来源取最大值：
+   *   - 全局叙事进度 uSceneColorProgress（好感度驱动，优先级最高）
+   *   - 鼠标光圈（距离越近越接近 1，边缘用 smoothstep 做羽化）
+   *
+   * @param radius*0.2 到 radius 之间是羽化带，占半径的 80%
+   */
+  const REVEAL_FUNCTION = `
+    float revealAmount(vec3 worldPos, vec3 center, float radius, float strength, float sceneProgress) {
+      float distanceToPointer = distance(worldPos, center);
+      float revealEdge = 1.0 - smoothstep(radius * 0.2, radius, distanceToPointer);
+      return max(sceneProgress, revealEdge * strength);
+    }
+  `;
+
+  /* ==========================================================================
+   * 7. 材质工厂
+   *    每个工厂返回一个 ShaderMaterial，uniforms 结构统一，
+   *    便于后面统一批量更新。
+   * ========================================================================== */
+
+  /**
+   * 地板材质。
+   * 特有 uniform：uFlipY —— 相邻段落交替翻转贴图（在 configureSegment 中设置），
+   * 避免每段地板纹理完全一样导致的重复感。
+   */
+  function createFloorMaterial() {
+    return new THREE.ShaderMaterial({
+      side: THREE.DoubleSide,
+      uniforms: {
+        uSketchMap: { value: loadFloorTexture('./assets/floor-sketch.png') },
+        uPaintMap: { value: loadFloorTexture('./assets/floor-painted.png') },
+        /** 1 = 正常方向，0 = 上下翻转贴图 */
+        uFlipY: { value: 1 },
+        uRevealCenter: { value: new THREE.Vector3(-1000, -1000, -1000) },
+        uRevealRadius: { value: 4.2 },
+        uRevealStrength: { value: 0 },
+        uSceneColorProgress: { value: PREVIEW_FULL_COLOR ? 1 : 0 },
+      },
+      vertexShader: VERTEX_WORLD,
+      fragmentShader: `
+        uniform sampler2D uSketchMap;
+        uniform sampler2D uPaintMap;
+        uniform float uFlipY;
+        uniform vec3 uRevealCenter;
+        uniform float uRevealRadius;
+        uniform float uRevealStrength;
+        uniform float uSceneColorProgress;
+        varying vec2 vUv;
+        varying vec3 vWorldPosition;
+
+        ${REVEAL_FUNCTION}
+
+        void main() {
+          vec2 textureUv = vec2(vUv.x, uFlipY > 0.5 ? vUv.y : 1.0 - vUv.y);
+          vec4 sketchColor = texture2D(uSketchMap, textureUv);
+          vec4 paintedColor = texture2D(uPaintMap, textureUv);
+          float reveal = revealAmount(
+            vWorldPosition, uRevealCenter, uRevealRadius, uRevealStrength, uSceneColorProgress
+          );
+          gl_FragColor = mix(sketchColor, paintedColor, reveal);
+        }
+      `,
+    });
+  }
+
+  /**
+   * 墙面材质。
+   * 注意：0.64 的降饱和系数，让上色后的墙面比原图更淡，
+   * 避免大面积暖色墙面在视觉上压过角色与道具。
+   */
+  function createWallMaterial() {
+    return new THREE.ShaderMaterial({
+      side: THREE.DoubleSide,
+      uniforms: {
+        uSketchMap: { value: loadImageTexture('./assets/wall-sketch-tile.png', 1.35, 2.4, '黑白墙面') },
+        uPaintMap: { value: loadImageTexture('./assets/wall-painted-tile.png', 1.35, 2.4, '暖色墙面') },
+        uRevealCenter: { value: new THREE.Vector3(-1000, -1000, -1000) },
+        uRevealRadius: { value: 4.2 },
+        uRevealStrength: { value: 0 },
+        uSceneColorProgress: { value: PREVIEW_FULL_COLOR ? 1 : 0 },
+      },
+      vertexShader: VERTEX_WORLD,
+      fragmentShader: `
+        uniform sampler2D uSketchMap;
+        uniform sampler2D uPaintMap;
+        uniform vec3 uRevealCenter;
+        uniform float uRevealRadius;
+        uniform float uRevealStrength;
+        uniform float uSceneColorProgress;
+        varying vec2 vUv;
+        varying vec3 vWorldPosition;
+
+        ${REVEAL_FUNCTION}
+
+        void main() {
+          vec4 sketchColor = texture2D(uSketchMap, vUv);
+          vec4 paintedColor = texture2D(uPaintMap, vUv);
+          float reveal = revealAmount(
+            vWorldPosition, uRevealCenter, uRevealRadius, uRevealStrength, uSceneColorProgress
+          );
+          paintedColor.rgb = mix(vec3(1.0), paintedColor.rgb, 0.64);
+          gl_FragColor = mix(sketchColor, paintedColor, reveal);
+        }
+      `,
+    });
+  }
+
+  /** 墙裙材质（墙面下部的深色护墙板），结构与墙面一致，无降饱和处理 */
+  function createWallSkirtMaterial() {
+    return new THREE.ShaderMaterial({
+      side: THREE.DoubleSide,
+      uniforms: {
+        uSketchMap: { value: loadImageTexture('./assets/wall-skirt-sketch-cropped.png', 1, 1, '墙裙') },
+        uPaintMap: { value: loadImageTexture('./assets/wall-skirt-painted-cropped.png', 1, 1, '墙裙') },
+        uRevealCenter: { value: new THREE.Vector3(-1000, -1000, -1000) },
+        uRevealRadius: { value: 4.2 },
+        uRevealStrength: { value: 0 },
+        uSceneColorProgress: { value: PREVIEW_FULL_COLOR ? 1 : 0 },
+      },
+      vertexShader: VERTEX_WORLD,
+      fragmentShader: `
+        uniform sampler2D uSketchMap;
+        uniform sampler2D uPaintMap;
+        uniform vec3 uRevealCenter;
+        uniform float uRevealRadius;
+        uniform float uRevealStrength;
+        uniform float uSceneColorProgress;
+        varying vec2 vUv;
+        varying vec3 vWorldPosition;
+
+        ${REVEAL_FUNCTION}
+
+        void main() {
+          vec4 sketchColor = texture2D(uSketchMap, vUv);
+          vec4 paintedColor = texture2D(uPaintMap, vUv);
+          float reveal = revealAmount(
+            vWorldPosition, uRevealCenter, uRevealRadius, uRevealStrength, uSceneColorProgress
+          );
+          gl_FragColor = mix(sketchColor, paintedColor, reveal);
+        }
+      `,
+    });
+  }
+
+  /**
+   * 顶角线材质（墙顶装饰条）。
+   * 带透明区域，需要 discard 掉 alpha 过低的像素。
+   */
+  function createTopTrimMaterial() {
+    const sketchTexture = loadImageTexture('./assets/wall-top-trim-sketch-transparent.png', 1, 1, '顶角线线稿');
+    const paintTexture = loadImageTexture('./assets/wall-top-trim-transparent.png', 1, 1, '顶角线有色');
+    // 顶角线是长条形贴图，纵向不能平铺，否则会出现重复接缝
+    sketchTexture.wrapT = THREE.ClampToEdgeWrapping;
+    paintTexture.wrapT = THREE.ClampToEdgeWrapping;
+    return new THREE.ShaderMaterial({
+      uniforms: {
+        uSketchMap: { value: sketchTexture },
+        uPaintMap: { value: paintTexture },
+        uRevealCenter: { value: new THREE.Vector3(-1000, -1000, -1000) },
+        uRevealRadius: { value: 4.2 },
+        uRevealStrength: { value: 0 },
+        uSceneColorProgress: { value: PREVIEW_FULL_COLOR ? 1 : 0 },
+      },
+      vertexShader: VERTEX_WORLD,
+      fragmentShader: `
+        uniform sampler2D uSketchMap;
+        uniform sampler2D uPaintMap;
+        uniform vec3 uRevealCenter;
+        uniform float uRevealRadius;
+        uniform float uRevealStrength;
+        uniform float uSceneColorProgress;
+        varying vec2 vUv;
+        varying vec3 vWorldPosition;
+
+        ${REVEAL_FUNCTION}
+
+        void main() {
+          vec4 sketchColor = texture2D(uSketchMap, vUv);
+          vec4 paintedColor = texture2D(uPaintMap, vUv);
+          float reveal = revealAmount(
+            vWorldPosition, uRevealCenter, uRevealRadius, uRevealStrength, uSceneColorProgress
+          );
+          vec4 trimColor = mix(sketchColor, paintedColor, reveal);
+
+          if (trimColor.a < 0.04) {
+            discard;
+          }
+
+          gl_FragColor = trimColor;
+        }
+      `,
+      transparent: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+  }
+
+  /**
+   * 壁灯材质（贴片式手绘灯）。
+   * 修复：原先 distance() 传入的是 vWorldPosition.xz(vec2) 与 uRevealCenter(vec3)，
+   * 类型不匹配会导致着色器编译失败或行为未定义；现改为完整三维距离，
+   * 与地板/墙面保持同一套度量。
+   */
+  function createWallLampMaterial() {
+    const sketchTexture = loadImageTexture('./assets/wall-lamp-transparent.png', 1, 1, '壁灯');
+    const paintTexture = loadImageTexture('./assets/wall-lamp-painted-transparent.png', 1, 1, '彩色壁灯');
+    [sketchTexture, paintTexture].forEach((texture) => {
+      texture.wrapS = THREE.ClampToEdgeWrapping;
+      texture.wrapT = THREE.ClampToEdgeWrapping;
+    });
+    return new THREE.ShaderMaterial({
+      uniforms: {
+        uSketchMap: { value: sketchTexture },
+        uPaintMap: { value: paintTexture },
+        uRevealCenter: { value: new THREE.Vector3(-1000, -1000, -1000) },
+        /** 壁灯光圈比地面小（3.2 vs 4.2），让灯本身的上色更聚焦 */
+        uRevealRadius: { value: 3.2 },
+        uRevealStrength: { value: 0 },
+        uSceneColorProgress: { value: PREVIEW_FULL_COLOR ? 1 : 0 },
+      },
+      vertexShader: VERTEX_WORLD,
+      fragmentShader: `
+        uniform sampler2D uSketchMap;
+        uniform sampler2D uPaintMap;
+        uniform vec3 uRevealCenter;
+        uniform float uRevealRadius;
+        uniform float uRevealStrength;
+        uniform float uSceneColorProgress;
+        varying vec2 vUv;
+        varying vec3 vWorldPosition;
+
+        ${REVEAL_FUNCTION}
+
+        void main() {
+          vec4 sketchColor = texture2D(uSketchMap, vUv);
+          vec4 paintedColor = texture2D(uPaintMap, vUv);
+          float reveal = revealAmount(
+            vWorldPosition, uRevealCenter, uRevealRadius, uRevealStrength, uSceneColorProgress
+          );
+          vec4 lampColor = mix(sketchColor, paintedColor, reveal);
+
+          if (lampColor.a < 0.04) {
+            discard;
+          }
+
+          gl_FragColor = lampColor;
+        }
+      `,
+      transparent: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+  }
+
+  /**
+   * 门材质（门框 / 门扇 / 尽头门 共用）。
+   *
+   * 与其它材质不同：门不是「圆形光圈」，而是「自下而上扫过」的色带，
+   * 由 uProgress 控制扫描线位置。
+   *
+   * 【重要修复 1】原实现用 mix() 混合 RGBA，alpha 也被一起混了。
+   * 线稿图与彩图的有效内容区域若不完全重合，上色过程中边缘像素的 alpha
+   * 会被拉到 discard 阈值以下，导致「门变彩色时整体缩小一圈」。
+   *
+   * 【重要修复 2 —— 尽头门专用】形状必须锚定在线稿上，不能取两张图的并集。
+   * 实测尽头门框两张图的镂空开口并不一样大：
+   *     线稿开口宽 0.6030（归一化）→ 世界单位 2.1829
+   *     彩图开口宽 0.5890（归一化）→ 世界单位 2.1321
+   * 彩图边框画得更厚，开口比线稿小 2.33%。
+   * 若用 max(sketch.a, paint.a) 取并集，开口会取到更小的那个，
+   * 上色时开口从 2.1829 缩到 2.1321，垫在后面的门扇露出部分随之变少，
+   * 视觉上就是「门变小了」。
+   * 只有尽头门有这个问题，因为其他门用的是 -solid 实心图，没有镂空开口。
+   *
+   * 现改为：shapeAlpha 恒定取线稿的 alpha（形状全程不变），
+   * 彩图只贡献颜色，不参与形状；彩图透明处用线稿颜色兜底，避免混入黑色。
+   *
+   * 【修复 3 —— 视觉收缩】几何上已经不缩了（实测露出门扇宽度上色前后差 0.00%），
+   * 但人眼仍会觉得「缩了一下」，原因是彩图在开口内侧画了一圈暗色渐变带：
+   *     线稿开口内侧起始亮度 0.67（亮），无暗带
+   *     彩图开口内侧亮度 0.30→0.17→0.13→0.08→0（暗），暗带宽约 8px ≈ 图宽 1%
+   * 上色后这圈暗带让门框「看起来」变粗约 0.073 世界单位（约 3.6%），
+   * 开口内的门扇露出面积随之在视觉上减少。
+   *
+   * 补偿办法：uPaintScale 对彩图的 UV 做整体缩放，把暗带挤出开口区域。
+   *   > 1 = 彩图内容缩小（暗带向开口内移，进入被 discard 的区域而消失）
+   *   < 1 = 彩图内容放大（暗带向外移，远离开口）
+   * 尽头门建议从 1.012 起调，肉眼调到「上色瞬间门不再缩」为止。
+   * 根本解决仍是重出彩图：开口对齐线稿、去掉内侧暗边、分辨率对齐线稿。
+   *
+   * @param {string} sketchPath 线稿图路径
+   * @param {string} paintPath 上色图路径
+   * @param {string} label 中文名，用于加载失败警告
+   * @param {number} paintScale 彩图 UV 缩放补偿系数，1 = 不补偿
+   */
+  function createDoorMaterial(sketchPath, paintPath, label, paintScale = 1) {
+    const sketchTexture = loadImageTexture(sketchPath, 1, 1, label);
+    const paintTexture = loadImageTexture(paintPath, 1, 1, label);
+    [sketchTexture, paintTexture].forEach((texture) => {
+      texture.wrapS = THREE.ClampToEdgeWrapping;
+      texture.wrapT = THREE.ClampToEdgeWrapping;
+    });
+    return new THREE.ShaderMaterial({
+      side: THREE.DoubleSide,
+      transparent: true,
+      alphaTest: 0.04,
+      depthWrite: true,
+      uniforms: {
+        uSketchMap: { value: sketchTexture },
+        uPaintMap: { value: paintTexture },
+        /** 0 = 全稿，1 = 全部上色。扫描线自下而上推进 */
+        uProgress: { value: 0 },
+        /** 彩图缩放补偿：>1 内容缩小，<1 内容放大。用于消除视觉收缩 */
+        uPaintScale: { value: paintScale },
+      },
+      vertexShader: `
+        varying vec2 vUv;
+
+        void main() {
+          vUv = uv;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform sampler2D uSketchMap;
+        uniform sampler2D uPaintMap;
+        uniform float uProgress;
+        uniform float uPaintScale;
+        varying vec2 vUv;
+
+        void main() {
+          vec4 sketchColor = texture2D(uSketchMap, vUv);
+          // 彩图按补偿系数缩放采样，把开口内侧的暗带挤出可见区域
+          vec2 paintUv = (vUv - 0.5) * uPaintScale + 0.5;
+          vec4 paintedColor = texture2D(uPaintMap, paintUv);
+
+          // 扫描线位置：uProgress=0 时在顶部，=1 时扫到底部
+          float revealStart = 1.0 - uProgress;
+          float revealBand = smoothstep(
+            revealStart - 0.035,
+            revealStart + 0.035,
+            vUv.y
+          ) * smoothstep(0.0, 0.06, uProgress);
+
+          // 形状恒定以线稿为准：上色全程开口尺寸不变
+          float shapeAlpha = sketchColor.a;
+
+          // 彩图在形状之外的地方是透明的，直接用会混进黑色，用线稿色兜底
+          vec3 paintRgb = paintedColor.a > 0.04 ? paintedColor.rgb : sketchColor.rgb;
+          vec3 mixedRgb = mix(sketchColor.rgb, paintRgb, revealBand);
+
+          if (shapeAlpha < 0.04) {
+            discard;
+          }
+
+          gl_FragColor = vec4(mixedRgb, shapeAlpha);
+        }
+      `,
+    });
+  }
+
+  /**
+   * 壁灯的暖光晕材质。
+   * 用 Canvas 现画一个径向渐变，避免额外加载图片资源。
+   */
+  function createLampGlowMaterial() {
+    const glowCanvas = document.createElement('canvas');
+    glowCanvas.width = 256;
+    glowCanvas.height = 256;
+    const context = glowCanvas.getContext('2d');
+    const gradient = context.createRadialGradient(128, 128, 8, 128, 128, 128);
+    gradient.addColorStop(0, 'rgba(255, 207, 92, 0.56)');
+    gradient.addColorStop(0.34, 'rgba(255, 210, 110, 0.3)');
+    gradient.addColorStop(1, 'rgba(255, 210, 110, 0)');
+    context.fillStyle = gradient;
+    context.fillRect(0, 0, 256, 256);
+    const texture = new THREE.CanvasTexture(glowCanvas);
+    texture.colorSpace = THREE.SRGBColorSpace;
+    return new THREE.MeshBasicMaterial({
+      map: texture,
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.NormalBlending,
+      side: THREE.DoubleSide,
+    });
+  }
+
+  /* ==========================================================================
+   * 8. 共享材质库
+   *    这些材质是「模板」，创建具体网格时必须 .clone()，
+   *    否则所有段落会共用同一份 uniforms，改一个就全变。
+   * ========================================================================== */
+
+  const shared = {
+    /** 地板材质模板 */
+    floor: createFloorMaterial(),
+    /** 墙面材质模板 */
+    wall: createWallMaterial(),
+    /** 墙裙材质模板 */
+    wallSkirt: createWallSkirtMaterial(),
+    /** 天花板：不参与光圈，固定材质即可 */
+    ceiling: new THREE.MeshBasicMaterial({
+      map: loadImageTexture('./assets/ceiling-paper-textured.png', 1.2, 2.4, '天花板纸纹'),
+      color: '#eeeeee',
+      side: THREE.DoubleSide,
+    }),
+    /** 顶角线材质模板 */
+    topTrim: createTopTrimMaterial(),
+    /** 壁灯材质模板 */
+    wallLamp: createWallLampMaterial(),
+    /** 侧门门框 */
+    doorFrame: createDoorMaterial(
+      './assets/door-frame-sketch-solid.png',
+      './assets/door-frame-painted-solid.png',
+      '门框',
+    ),
+    /** 侧门门扇 */
+    doorLeaf: createDoorMaterial(
+      './assets/door-sketch-solid.png',
+      './assets/door-painted-solid.png',
+      '门扇',
+    ),
+    /**
+     * 尽头门门框（线稿→彩图）。
+     * 末尾参数 1.012 是彩图缩放补偿：把开口内侧的暗带挤出可见区域，
+     * 消除「上色时门看起来缩一下」的视觉错觉。数值可继续微调。
+     */
+    endDoorFrameSketch: createDoorMaterial(
+      './assets/end-door-frame-sketch.png',
+      './assets/end-door-frame-painted.png',
+      '尽头门框',
+      1.012,
+    ),
+    /** 尽头门门扇（线稿→彩图） */
+    endDoorLeafSketch: createDoorMaterial(
+      './assets/end-door-leaf-sketch.png',
+      './assets/end-door-leaf-painted.png',
+      '尽头门扇',
+      1.012,
+    ),
+  };
+
+  /* ==========================================================================
+   * 9. 运行时状态
+   * ========================================================================== */
+
+  /** 相机目标 Z（插值终点），实际位置每帧缓动靠近它 */
+  let targetZ = camera.position.z;
+  /** 相机目标 X，随鼠标横向位置轻微偏移 */
+  let targetX = 0;
+  /** 鼠标是否处于按下拖拽状态 */
+  let pointerDown = false;
+  /** 上一帧的鼠标 Y，用于计算拖拽增量 */
+  let lastPointerY = 0;
+  /** 相机当前所在的段落索引 */
+  let currentSegment = 0;
+
+  /** 鼠标是否在画布内（移出则关闭光圈） */
+  let pointerInside = false;
+  /** 归一化设备坐标 (-1~1)，raycaster 的输入 */
+  const pointer = new THREE.Vector2(-10, -10);
+  /** 射线投射器：只用于「鼠标指向哪个可交互物体」，不参与光圈定位 */
+  const raycaster = new THREE.Raycaster();
+
+  /**
+   * 场景色进度：0 = 冷色调线稿，1 = 全彩。
+   * 这是叙事状态，由好感度系统通过 setSceneColorProgress 驱动。
+   */
+  let sceneColorProgress = PREVIEW_FULL_COLOR ? 1 : 0;
+  /** 目标值，每帧向它缓动，避免突变 */
+  let targetSceneColorProgress = PREVIEW_FULL_COLOR ? 1 : 0;
+
+  /** 地板/墙/墙裙的光圈强度目标值（0 或 1，实际值每帧缓动） */
+  let targetRevealStrength = 0;
+  /** 顶角线的光圈强度目标值（与主体分开，因为顶角线材质是独立集合） */
+  let targetTopTrimRevealStrength = 0;
+  /** 壁灯的光圈强度目标值 */
+  let targetLampRevealStrength = 0;
+
+  /** 当前悬停的门状态对象（用于推进它的上色进度） */
+  let hoveredDoorState = null;
+  /** 当前悬停的壁灯 Group */
+  let hoveredLamp = null;
+
+  /** 用于计算每帧 delta 的时钟 */
+  const revealClock = new THREE.Clock();
+
+  /**
+   * 设置场景色进度（对外的唯一接口）。
+   * 后续好感度系统只需调用这一个函数。
+   * @param {number} progress 0~1
+   */
+  function setSceneColorProgress(progress) {
+    targetSceneColorProgress = THREE.MathUtils.clamp(Number(progress) || 0, 0, 1);
+  }
+
+  // 对外暴露稳定 API，供未来的好感度 / 关系系统挂载
+  window.setCorridorMood = setSceneColorProgress;
+  window.setAffinity = setSceneColorProgress;
+
+  /* ==========================================================================
+   * 10. 对象注册表
+   *     这些 Set 记录「哪些网格参与射线检测」「哪些材质需要每帧更新」，
+   *     避免每帧遍历整棵场景图。
+   * ========================================================================== */
+
+  /** index → 段落 Group 的映射，当前在场的段落 */
+  const activeSegments = new Map();
+  /** 段落对象池，所有段落都在这里循环复用 */
+  const segmentPool = [];
+
+  /** 参与射线检测的地板网格 */
+  const floorMeshes = new Set();
+  /** 参与射线检测的墙面网格 */
+  const wallMeshes = new Set();
+  /** 参与射线检测的墙裙网格 */
+  const wallSkirtMeshes = new Set();
+  /** 参与射线检测的顶角线网格 */
+  const topTrimMeshes = new Set();
+  /** 参与射线检测的门网格 */
+  const doorMeshes = new Set();
+  /** 参与射线检测的壁灯网格 */
+  const lampMeshes = new Set();
+
+  /**
+   * 所有门的动画状态：{ group, materials, progress }
+   * 每个门实例一份，因为上色进度是逐个门独立推进的。
+   */
+  const doorStates = new Set();
+
+  /** 主体表面（地板/墙/墙裙）的材质，需要每帧同步 uRevealCenter */
+  const activeRevealMaterials = new Set();
+  /** 本帧真正被光圈覆盖的材质子集 */
+  const activeRevealTargets = new Set();
+  /** 壁灯材质，光圈半径与主体不同，单独一组 */
+  const lampRevealMaterials = new Set();
+  /** 顶角线材质，单独一组 */
+  const topTrimRevealMaterials = new Set();
+
+  /** 桌子工厂（来自 corridor-table.js） */
+  const tables = createTableFactory(loadImageTexture);
+
+  /* ==========================================================================
+   * 11. 构件工厂
+   *     每个函数负责造出走廊的一个组成部分。
+   * ========================================================================== */
+
+  /**
+   * 造一组墙（墙面 + 墙裙 + 顶角线）。
+   * @param {number} side -1 = 左墙，1 = 右墙
+   * @returns {THREE.Group}
+   */
+  function createWall(side) {
+    const wallGroup = new THREE.Group();
+    wallGroup.userData.side = side;
+    wallGroup.rotation.y = side * WALL_SPLAY;
+
+    // --- 墙面 ---
+    const wall = new THREE.Mesh(
+      new THREE.PlaneGeometry(SEGMENT_LENGTH, HEIGHT),
+      shared.wall.clone(), // 必须 clone：每段墙有独立的 uniforms
+    );
+    wall.rotation.y = side * Math.PI / 2;
+    wall.position.set(side * WIDTH / 2, HEIGHT / 2, 0);
+    wallGroup.add(wall);
+    wallGroup.userData.wall = wall;
+    // revealPlane 用于在调试时区分表面类型
+    wall.material.userData.revealPlane = side < 0 ? 'wall-left' : 'wall-right';
+    wallMeshes.add(wall);
+    activeRevealMaterials.add(wall.material);
+
+    // --- 墙裙 ---
+    const skirt = new THREE.Mesh(
+      new THREE.PlaneGeometry(SEGMENT_LENGTH, WALL_SKIRT_HEIGHT),
+      shared.wallSkirt.clone(),
+    );
+    skirt.rotation.y = side * Math.PI / 2;
+    skirt.position.set(
+      side * WALL_SKIRT_WORLD_X,
+      WALL_SKIRT_HEIGHT / 2 + WALL_SKIRT_VERTICAL_OFFSET,
+      0,
+    );
+    wallGroup.add(skirt);
+    wallGroup.userData.skirt = skirt;
+    skirt.material.userData.revealPlane = side < 0 ? 'skirt-left' : 'skirt-right';
+    wallSkirtMeshes.add(skirt);
+    activeRevealMaterials.add(skirt.material);
+
+    // --- 顶角线 ---
+    // 修复：原先这里直接用 shared.topTrim 而不 clone，
+    // 导致所有段落共用一份材质、userData.revealPlane 互相覆盖。
+    const topTrim = new THREE.Mesh(
+      new THREE.PlaneGeometry(SEGMENT_LENGTH, TOP_TRIM_PLANE_HEIGHT),
+      shared.topTrim.clone(),
+    );
+    topTrim.rotation.y = side * Math.PI / 2;
+    topTrim.position.set(
+      side * (WIDTH / 2 - TOP_TRIM_WALL_INSET),
+      HEIGHT - TOP_TRIM_PLANE_HEIGHT * 0.25 + TOP_TRIM_VERTICAL_OFFSET,
+      0,
+    );
+    topTrim.renderOrder = 1;
+    wallGroup.add(topTrim);
+    wallGroup.userData.topTrim = topTrim;
+    topTrim.material.userData.revealPlane = side < 0 ? 'trim-left' : 'trim-right';
+    topTrimMeshes.add(topTrim);
+    topTrimRevealMaterials.add(topTrim.material);
+
+    return wallGroup;
+  }
+
+  /**
+   * 造一扇侧门（门框 + 门扇两个叠放的平面）。
+   * @returns {THREE.Group}
+   */
+  function createDoor() {
+    const door = new THREE.Group();
+
+    const doorFrame = new THREE.Mesh(
+      new THREE.PlaneGeometry(7.8, 5.0),
+      shared.doorFrame.clone(),
+    );
+    doorFrame.position.y = 2.156;
+    doorFrame.renderOrder = 2;
+
+    const doorLeaf = new THREE.Mesh(
+      new THREE.PlaneGeometry(7.2, 4.75),
+      shared.doorLeaf.clone(),
+    );
+    doorLeaf.position.y = 2.18;
+    doorLeaf.renderOrder = 1;
+
+    door.add(doorFrame, doorLeaf);
+
+    // 一个门的两块贴图共用一个进度，才能同步上色
+    const state = {
+      group: door,
+      materials: [doorFrame.material, doorLeaf.material],
+      progress: 0,
+    };
+    doorMeshes.add(doorFrame);
+    doorMeshes.add(doorLeaf);
+    doorStates.add(state);
+    doorFrame.userData.doorState = state;
+    doorLeaf.userData.doorState = state;
+    door.userData.frame = doorFrame;
+    door.userData.leaf = doorLeaf;
+    door.userData.state = state;
+
+    return door;
+  }
+
+  /**
+   * 造一盏壁灯。
+   * 结构：光晕面片 + 点光源 + 背衬剪影（制造厚度感）+ 正面贴片。
+   * @returns {THREE.Group}
+   */
+  function createLamp() {
+    const lamp = new THREE.Group();
+    lamp.userData.isWallLamp = true;
+
+    // 光晕：始终面向相机，关闭深度测试避免被墙面裁掉
+    const glow = new THREE.Mesh(
+      new THREE.PlaneGeometry(2.15, 2.15),
+      createLampGlowMaterial(),
+    );
+    glow.position.set(0, 0.34, LAMP_DEPTH * 0.45);
+    glow.renderOrder = 1;
+    glow.material.depthTest = false;
+    lamp.add(glow);
+
+    // 点光源：初始强度 0，悬停时点亮
+    const pointLight = new THREE.PointLight('#ffd36a', 0.8, 5.5, 2);
+    pointLight.position.set(0, 0.34, 0.08);
+    pointLight.userData.baseIntensity = 0.8;
+    pointLight.intensity = 0;
+    lamp.add(pointLight);
+    lamp.userData.glow = glow;
+    lamp.userData.pointLight = pointLight;
+
+    /**
+     * 背衬剪影：把同一个手绘轮廓稍微缩小、加深、后退一点，
+     * 在斜视角下形成一条窄边，比加一个矩形背板自然得多。
+     */
+    const depthMaterial = shared.wallLamp.clone();
+    depthMaterial.color = new THREE.Color('#6b655e');
+    depthMaterial.opacity = 0.22;
+    depthMaterial.transparent = true;
+    depthMaterial.depthWrite = false;
+    const depthFace = new THREE.Mesh(
+      new THREE.PlaneGeometry(LAMP_WIDTH, LAMP_HEIGHT),
+      depthMaterial,
+    );
+    depthFace.position.z = -LAMP_DEPTH * 0.16;
+    depthFace.scale.set(0.992, 0.992, 1);
+    depthFace.renderOrder = 1;
+    lamp.add(depthFace);
+
+    // 正面贴片
+    const face = new THREE.Mesh(
+      new THREE.PlaneGeometry(LAMP_WIDTH, LAMP_HEIGHT),
+      shared.wallLamp.clone(),
+    );
+    face.position.z = LAMP_DEPTH * 0.22;
+    face.renderOrder = 2;
+    lamp.add(face);
+
+    lampMeshes.add(face);
+    lampRevealMaterials.add(face.material);
+    lampMeshes.add(depthFace);
+    lampRevealMaterials.add(depthFace.material);
+
+    return lamp;
+  }
+
+  /**
+   * 造走廊尽头的封口墙 + 尽头的门（只在最后一段显示）。
+   * 这里的所有表面都锁定为「已上色」状态（uSceneColorProgress = 1），
+   * 作为叙事终点的视觉暗示。
+   * @returns {THREE.Group}
+   */
+  function createEndDoorWall() {
+    const group = new THREE.Group();
+    group.name = 'module-7-end-wall';
+    group.visible = false;
+
+    /**
+     * 在尽头墙上加一块表面。
+     * @param {THREE.Material} source 材质模板
+     * @param {number} width 宽
+     * @param {number} height 高
+     * @param {number} y 高度位置
+     * @param {number} z 深度位置
+     */
+    function addSurface(source, width, height, y, z) {
+      const material = source.clone();
+      // 尽头墙固定为全彩，不参与光圈
+      material.uniforms.uSceneColorProgress.value = 1;
+      material.uniforms.uRevealStrength.value = 0;
+      const mesh = new THREE.Mesh(new THREE.PlaneGeometry(width, height), material);
+      mesh.position.set(0, y, z);
+      group.add(mesh);
+      activeRevealMaterials.add(material);
+      if (source === shared.wall) material.userData.revealPlane = 'wall';
+      if (source === shared.wallSkirt) material.userData.revealPlane = 'skirt';
+      if (source === shared.topTrim) material.userData.revealPlane = 'trim';
+      return mesh;
+    }
+
+    const endWall = addSurface(shared.wall, WIDTH, HEIGHT, HEIGHT / 2, 0);
+    endWall.material.userData.revealPlane = 'end-wall';
+
+    const endSkirt = addSurface(
+      shared.wallSkirt, WIDTH, WALL_SKIRT_HEIGHT,
+      WALL_SKIRT_HEIGHT / 2 + WALL_SKIRT_VERTICAL_OFFSET,
+      WALL_SKIRT_FLOOR_INSET,
+    );
+    endSkirt.material.userData.revealPlane = 'end-wall';
+    wallMeshes.add(endWall);
+    wallSkirtMeshes.add(endSkirt);
+
+    const trim = addSurface(
+      shared.topTrim, WIDTH, TOP_TRIM_PLANE_HEIGHT,
+      HEIGHT - TOP_TRIM_PLANE_HEIGHT * 0.25 + TOP_TRIM_VERTICAL_OFFSET,
+      TOP_TRIM_WALL_INSET,
+    );
+    trim.renderOrder = 1;
+    // 顶角线走独立的光圈集合，从主体集合中移除，避免被更新两次
+    activeRevealMaterials.delete(trim.material);
+    topTrimMeshes.add(trim);
+    topTrimRevealMaterials.add(trim.material);
+
+    /**
+     * 尽头门的框与扇。
+     * 每个池化实例都需要自己的 uniforms，否则一段门的上色进度会覆盖其它段。
+     */
+    const frame = new THREE.Mesh(
+      new THREE.PlaneGeometry(3.62, 4.85),
+      shared.endDoorFrameSketch.clone(),
+    );
+    frame.position.set(0, 2.425, 0.075);
+    frame.renderOrder = 3;
+
+    const leaf = new THREE.Mesh(
+      new THREE.PlaneGeometry(2.25, 3.99),
+      shared.endDoorLeafSketch.clone(),
+    );
+    leaf.position.set(0, 1.995, 0.05);
+    leaf.renderOrder = 4;
+
+    group.add(frame, leaf);
+    const state = { group, materials: [frame.material, leaf.material], progress: 0 };
+    doorStates.add(state);
+    frame.userData.doorState = state;
+    leaf.userData.doorState = state;
+    doorMeshes.add(frame);
+    doorMeshes.add(leaf);
+
+    return group;
+  }
+
+  /**
+   * 造一个完整的走廊段落（地板 + 天花板 + 左右墙 + 门 + 尽头墙 + 壁灯 + 桌子）。
+   * 创建时不定位，位置由 configureSegment 决定。
+   * @returns {THREE.Group}
+   */
+  function createSegment() {
+    const group = new THREE.Group();
+    group.userData.index = null;
+    group.visible = false;
+
+    // --- 地板 ---
+    const floor = new THREE.Mesh(
+      new THREE.PlaneGeometry(WIDTH, SEGMENT_LENGTH),
+      shared.floor.clone(),
+    );
+    floor.userData.isCorridorFloor = true;
+    floor.rotation.x = -Math.PI / 2;
+    floor.position.y = 0;
+    group.add(floor);
+    group.userData.floor = floor;
+    floorMeshes.add(floor);
+    activeRevealMaterials.add(floor.material);
+    floor.material.userData.revealPlane = 'floor';
+
+    // --- 天花板 ---
+    const ceiling = new THREE.Mesh(
+      new THREE.PlaneGeometry(WIDTH, SEGMENT_LENGTH),
+      shared.ceiling,
+    );
+    ceiling.rotation.x = Math.PI / 2;
+    ceiling.position.y = HEIGHT;
+    group.add(ceiling);
+
+    // --- 左右墙 ---
+    const leftWall = createWall(-1);
+    const rightWall = createWall(1);
+    group.add(leftWall, rightWall);
+    group.userData.leftWall = leftWall;
+    group.userData.rightWall = rightWall;
+
+    // --- 门 / 尽头墙 / 壁灯 / 桌子 ---
+    const door = createDoor();
+    group.add(door);
+    group.userData.door = door;
+
+    const endDoor = createEndDoorWall();
+    group.add(endDoor);
+    group.userData.endDoor = endDoor;
+
+    const lamp = createLamp();
+    lamp.position.y = LAMP_BOTTOM_Y + LAMP_HEIGHT / 2;
+    group.add(lamp);
+    group.userData.lamp = lamp;
+
+    const table = tables.create();
+    group.add(table);
+    group.userData.table = table;
+
+    return group;
+  }
+
+  /**
+   * 把一个池化段落配置成第 index 段：设置位置、朝向、可见性。
+   * 段落沿 -Z 排列，所以 z = -index * SEGMENT_LENGTH - SEGMENT_LENGTH / 2。
+   * @param {THREE.Group} group 段落
+   * @param {number} index 段落索引（从 0 开始）
+   */
+  function configureSegment(group, index) {
+    group.userData.index = index;
+    group.visible = true;
+    group.position.z = -index * SEGMENT_LENGTH - SEGMENT_LENGTH / 2;
+
+    // 相邻段落翻转地板贴图，消除重复感
+    group.userData.floor.material.uniforms.uFlipY.value = index % 2 === 0 ? 1 : 0;
+
+    // 门左右交替出现
+    const doorSide = index % 2 === 0 ? -1 : 1;
+    const door = group.userData.door;
+    door.visible = true;
+    const doorAnchorZ = -1.8 + (index % 3) * 0.7;
+    door.position.z = doorAnchorZ;
+
+    // 桌子只在偶数段出现，且紧挨门边
+    const table = group.userData.table;
+    table.visible = index % 2 === 0;
+    table.position.set(WIDTH / 2 - 0.72, 0, doorAnchorZ);
+    table.rotation.y = -Math.PI / 2;
+    table.userData.resetTableReveal();
+
+    door.rotation.y = doorSide * WALL_SPLAY;
+    door.userData.side = doorSide;
+    door.children.forEach((child) => {
+      child.position.x = doorSide * (WIDTH / 2 - DOOR_WALL_INSET);
+      child.rotation.y = doorSide * Math.PI / 2;
+    });
+    // 门框比门扇略微靠前，两者都落在墙裙平面之内
+    door.userData.frame.position.x -= doorSide * 0.006;
+
+    // 尽头墙只在第 7 段（index 6）显示
+    const endDoor = group.userData.endDoor;
+    endDoor.visible = index === 6;
+    endDoor.position.set(0, 0, -SEGMENT_LENGTH / 2);
+    endDoor.rotation.y = 0;
+
+    // 壁灯：稍微拉进走廊，避免被墙面裁掉轮廓；
+    // 且要与门沿 Z 错开，否则会被门的半透明像素遮住
+    const lamp = group.userData.lamp;
+    lamp.visible = true;
+    lamp.position.x = doorSide * (WIDTH / 2 - 0.68);
+    lamp.position.z = doorAnchorZ + (index % 2 === 0
+      ? (doorSide === -1 ? LAMP_DOOR_Z_OFFSET - 0.3 : LAMP_DOOR_Z_OFFSET)
+      : (doorSide === -1 ? -LAMP_DOOR_Z_OFFSET + 0.3 : -LAMP_DOOR_Z_OFFSET));
+    // 左墙的灯水平镜像，让安装底板贴住墙面
+    lamp.scale.x = doorSide === -1 ? -1 : 1;
+    lamp.rotation.y = -doorSide * LAMP_FACE_ANGLE;
+  }
+
+  /* ==========================================================================
+   * 12. 段落池管理
+   * ========================================================================== */
+
+  /**
+   * 根据相机位置计算需要哪些段落，并从池里分配/回收。
+   * 只保留 [当前段-1, 当前段+SEGMENT_LOOKAHEAD]，其余回收复用。
+   */
+  function updateSegments() {
+    currentSegment = Math.max(0, Math.floor(-camera.position.z / SEGMENT_LENGTH));
+
+    const needed = new Set();
+    for (let offset = -1; offset <= SEGMENT_LOOKAHEAD; offset += 1) {
+      const index = currentSegment + offset;
+      if (index >= 0) needed.add(index);
+    }
+
+    // 首次调用时填满对象池
+    if (segmentPool.length === 0) {
+      for (let slot = 0; slot < SEGMENT_POOL_SIZE; slot += 1) {
+        const segment = createSegment();
+        segmentPool.push(segment);
+        corridor.add(segment);
+      }
+    }
+
+    needed.forEach((index) => {
+      if (activeSegments.has(index)) return;
+      // 找一个「当前不需要」的池化段落来复用
+      const segment = segmentPool.find((candidate) => !needed.has(candidate.userData.index));
+      if (!segment) return;
+
+      if (segment.userData.index !== null) {
+        activeSegments.delete(segment.userData.index);
+      }
+
+      configureSegment(segment, index);
+      activeSegments.set(index, segment);
+    });
+
+    segmentReadout.textContent =
+      `走廊模块 ${String(currentSegment + 1).padStart(2, '0')} · ${activeSegments.size} 段活动中`;
+  }
+
+  /* ==========================================================================
+   * 13. 交互事件
+   * ========================================================================== */
+
+  /** 滚轮：向前推进相机 */
+  function handleWheel(event) {
+    event.preventDefault();
+    targetZ = Math.max(CAMERA_MIN_Z, targetZ - event.deltaY * 0.025);
+  }
+
+  /** 指针移动：更新归一化坐标、横向视差、拖拽推进，并刷新光圈 */
+  function handlePointerMove(event) {
+    pointer.x = (event.clientX / window.innerWidth) * 2 - 1;
+    pointer.y = -(event.clientY / window.innerHeight) * 2 + 1;
+    pointerInside = true;
+
+    // 鼠标横向位置带来轻微的视差偏移
+    const normalizedX = (event.clientX / window.innerWidth) * 2 - 1;
+    targetX = normalizedX * 1.1;
+
+    // 按住拖拽时，纵向移动推进相机
+    if (pointerDown) {
+      targetZ = Math.max(CAMERA_MIN_Z, targetZ - (event.clientY - lastPointerY) * 0.08);
+      lastPointerY = event.clientY;
+    }
+
+    updateReveal();
+  }
+
+  /** 指针移出画布：关闭所有光圈与悬停态 */
+  function handlePointerLeave() {
+    activeRevealTargets.clear();
+    tables.hover(null);
+    pointerInside = false;
+    targetRevealStrength = 0;
+    targetTopTrimRevealStrength = 0;
+    targetLampRevealStrength = 0;
+    hoveredDoorState = null;
+    hoveredLamp = null;
+  }
+
+  /**
+   * 判断一个对象及其所有父级是否可见。
+   * 池化的段落虽然 visible=false 但仍在场景里，必须过滤掉，
+   * 否则射线会打到不可见的物体上。
+   * @param {THREE.Object3D} object
+   * @returns {boolean}
+   */
+  function isWorldVisible(object) {
+    let current = object;
+    while (current) {
+      if (!current.visible) return false;
+      current = current.parent;
+    }
+    return true;
+  }
+
+  /* ==========================================================================
+   * 14. 光圈与悬停解析
+   * ========================================================================== */
+
+  /**
+   * 每帧（或鼠标移动时）重新计算光圈中心与悬停目标。
+   *
+   * 【核心设计】只做一次射线检测，求出「鼠标指向的最近表面点」，
+   * 然后把这个点作为**所有材质共用的** uRevealCenter。
+   * 每个片元在着色器里各自算到自己与这个中心的距离，
+   * 所以光圈天然跨地板/墙裙/墙面连续，不会在接缝处断裂。
+   */
+  function updateReveal() {
+    // 鼠标不在画布内，或场景还没建好 → 关闭所有光圈
+    if (
+      !pointerInside ||
+      (floorMeshes.size === 0 &&
+        wallSkirtMeshes.size === 0 &&
+        topTrimMeshes.size === 0)
+    ) {
+      activeRevealTargets.clear();
+      targetRevealStrength = 0;
+      targetTopTrimRevealStrength = 0;
+      targetLampRevealStrength = 0;
+      tables.hover(null);
+      return;
+    }
+
+    raycaster.setFromCamera(pointer, camera);
+
+    // 分别对四类表面做射线检测，各自取最近交点
+    const surfaceHit = raycaster.intersectObjects(
+      [...floorMeshes, ...wallSkirtMeshes, ...wallMeshes].filter(isWorldVisible),
+      false,
+    )[0];
+    const topTrimHit = raycaster.intersectObjects(
+      [...topTrimMeshes].filter(isWorldVisible), false,
+    )[0];
+    const doorHit = raycaster.intersectObjects(
+      [...doorMeshes].filter(isWorldVisible), false,
+    )[0];
+    const lampHit = raycaster.intersectObjects(
+      [...lampMeshes].filter(isWorldVisible), false,
+    )[0];
+    const tableHit = tables.intersect(raycaster, isWorldVisible);
+
+    /**
+     * 在所有命中点里取最近的那个，作为统一的光圈中心。
+     * 这一步是「光圈连续」的关键：不按物体分别计算，而是全场共用一个点。
+     */
+    const nearest = [surfaceHit, topTrimHit, doorHit, lampHit]
+      .filter(Boolean)
+      .sort((a, b) => a.distance - b.distance)[0];
+
+    // 桌子是实体家具，会挡住鼠标，此时光圈应该熄灭
+    const tableBlocksPointer = tableHit && (!nearest || tableHit.distance < nearest.distance);
+    tables.hover(tableBlocksPointer ? tableHit : null);
+    hoveredDoorState = tableBlocksPointer ? null : doorHit?.object.userData.doorState ?? null;
+    hoveredLamp = tableBlocksPointer ? null : lampHit?.object.parent ?? null;
+    targetLampRevealStrength = hoveredLamp && !tableBlocksPointer ? 1 : 0;
+
+    // 把统一中心点写入所有材质
+    activeRevealTargets.clear();
+    if (!tableBlocksPointer && nearest?.point) {
+      activeRevealMaterials.forEach((material) => {
+        material.uniforms.uRevealCenter.value.copy(nearest.point);
+        activeRevealTargets.add(material);
+      });
+      lampRevealMaterials.forEach((material) => {
+        material.uniforms.uRevealCenter.value.copy(nearest.point);
+      });
+      topTrimRevealMaterials.forEach((material) => {
+        material.uniforms.uRevealCenter.value.copy(nearest.point);
+      });
+    }
+
+    targetRevealStrength = !tableBlocksPointer && nearest?.point ? 1 : 0;
+    targetTopTrimRevealStrength = !tableBlocksPointer && nearest?.point ? 1 : 0;
+  }
+
+  /* ==========================================================================
+   * 15. 每帧更新
+   * ========================================================================== */
+
+  /** 相机缓动推进，并触发段落与光圈更新 */
+  function moveCamera() {
+    // 系统开启「减少动态效果」时直接跳到目标位置，不做缓动
+    const easing = prefersReducedMotion ? 1 : 0.075;
+    camera.position.z += (targetZ - camera.position.z) * easing;
+    camera.position.x += (targetX - camera.position.x) * 0.045;
+    camera.lookAt(camera.position.x * 0.18, 2.35, camera.position.z - 14);
+    updateReveal();
+    updateSegments();
+  }
+
+  /**
+   * 推进所有门的「上色扫描」进度。
+   * 目标值取 max(全局叙事进度, 是否悬停)，所以已经全局上色的门不会退回。
+   * @param {number} deltaSeconds 帧间隔（秒）
+   */
+  function updateDoorReveal(deltaSeconds) {
+    const progressStep = deltaSeconds / DOOR_REVEAL_DURATION;
+
+    doorStates.forEach((state) => {
+      const target = Math.max(sceneColorProgress, state === hoveredDoorState ? 1 : 0);
+      if (state.progress < target) {
+        state.progress = Math.min(target, state.progress + progressStep);
+      } else if (state.progress > target) {
+        state.progress = Math.max(target, state.progress - progressStep);
+      }
+
+      state.materials.forEach((material) => {
+        material.uniforms.uProgress.value = state.progress;
+      });
+    });
+  }
+
+  /**
+   * 壁灯的辉光与点光源强度缓动。
+   * 用 traverse 遍历是因为壁灯挂在段落 Group 下，没有单独的注册表。
+   * @param {number} deltaSeconds 帧间隔（秒）
+   */
+  function updateLampGlow(deltaSeconds) {
+    const step = Math.min(deltaSeconds * 8, 1);
+    corridor.traverse((object) => {
+      if (!object.userData?.isWallLamp) return;
+      const active = object === hoveredLamp;
+      const glow = object.userData.glow;
+      const pointLight = object.userData.pointLight;
+      const target = Math.max(sceneColorProgress, active ? 1 : 0);
+      glow.material.opacity += (target * 0.56 - glow.material.opacity) * step;
+      pointLight.intensity += (target * pointLight.userData.baseIntensity - pointLight.intensity) * step;
+    });
+  }
+
+  /** 窗口尺寸变化：更新相机宽高比与渲染尺寸 */
+  function resize() {
+    const width = window.innerWidth;
+    const height = window.innerHeight;
+    camera.aspect = width / height;
+    camera.updateProjectionMatrix();
+    renderer.setSize(width, height, false);
+  }
+
+  /* ==========================================================================
+   * 16. 事件绑定
+   * ========================================================================== */
+
+  canvas.addEventListener('wheel', handleWheel, { passive: false });
+  canvas.addEventListener('pointerdown', (event) => {
+    pointerDown = true;
+    lastPointerY = event.clientY;
+    canvas.setPointerCapture(event.pointerId);
+  });
+  canvas.addEventListener('pointermove', handlePointerMove);
+  canvas.addEventListener('pointerleave', handlePointerLeave);
+  canvas.addEventListener('pointerup', () => { pointerDown = false; });
+  canvas.addEventListener('pointercancel', () => { pointerDown = false; });
+  window.addEventListener('resize', resize);
+
+  /* ==========================================================================
+   * 17. 主渲染循环
+   * ========================================================================== */
+
+  /**
+   * 每帧执行顺序：
+   *   1. 全局叙事进度缓动
+   *   2. 相机移动 → 段落更新 → 光圈解析
+   *   3. 门的上色进度
+   *   4. 桌子的上色进度
+   *   5. 壁灯辉光
+   *   6. 所有材质写入 uniforms
+   *   7. 渲染
+   */
+  function render() {
+    requestAnimationFrame(render);
+
+    // delta 上限 0.1 秒，防止切后台再回来时出现巨大跳变
+    const deltaSeconds = Math.min(revealClock.getDelta(), 0.1);
+
+    // 指数缓动，让好感度变化看起来平滑
+    const moodEase = 1 - Math.exp(-4.5 * deltaSeconds);
+    sceneColorProgress += (targetSceneColorProgress - sceneColorProgress) * moodEase;
+
+    moveCamera();
+    updateDoorReveal(deltaSeconds);
+    tables.update(deltaSeconds, sceneColorProgress);
+    updateLampGlow(deltaSeconds);
+
+    // 主体表面：只有本帧被光圈覆盖的材质才提升强度，其余回落到 0
+    activeRevealMaterials.forEach((material) => {
+      material.uniforms.uSceneColorProgress.value = sceneColorProgress;
+      const target = activeRevealTargets.has(material) ? targetRevealStrength : 0;
+      material.uniforms.uRevealStrength.value +=
+        (target - material.uniforms.uRevealStrength.value) * 0.12;
+    });
+
+    // 壁灯与顶角线：整组统一强度（它们各自只有「悬停 / 不悬停」两种状态）
+    lampRevealMaterials.forEach((material) => {
+      material.uniforms.uSceneColorProgress.value = sceneColorProgress;
+      material.uniforms.uRevealStrength.value +=
+        (targetLampRevealStrength - material.uniforms.uRevealStrength.value) * 0.12;
+    });
+
+    topTrimRevealMaterials.forEach((material) => {
+      material.uniforms.uSceneColorProgress.value = sceneColorProgress;
+      material.uniforms.uRevealStrength.value +=
+        (targetTopTrimRevealStrength - material.uniforms.uRevealStrength.value) * 0.12;
+    });
+
+    renderer.render(scene, camera);
+  }
+
+  /* ==========================================================================
+   * 18. 启动
+   * ========================================================================== */
+
+  resize();
+  updateSegments();
+  render();
+  </script>
+</body>
+</html>

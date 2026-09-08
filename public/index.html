@@ -2,14 +2,14 @@
 <html lang="zh">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <meta name="theme-color" content="#120f12">
   <title>暗夜童话 AI 对话</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <div class="app-shell">
-    <aside class="sidebar" aria-label="会话导航">
+    <aside class="sidebar" id="conversationSidebar" aria-label="会话导航">
       <div class="brand-lockup">
         <p class="brand-kicker">夜色书页</p>
         <h2 class="brand-title">会话书签</h2>
@@ -27,17 +27,51 @@
         <div class="conversation-list" id="conversationList"></div>
         <p class="empty-conversations" id="emptyConversations" hidden>还没有会话记录。</p>
       </section>
+
+      <button class="account-button" id="accountButton" type="button">
+        <span class="account-avatar" aria-hidden="true">未</span>
+        <span class="account-copy">
+          <strong>未登录</strong>
+          <small>登录以同步会话</small>
+        </span>
+      </button>
     </aside>
 
     <main class="chat-panel">
       <header class="chat-header">
-        <div>
+        <button
+          class="sidebar-toggle"
+          id="sidebarToggle"
+          type="button"
+          aria-label="打开会话书签"
+          aria-controls="conversationSidebar"
+          aria-expanded="false"
+          title="打开会话书签"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 7h16M4 12h16M4 17h16"></path>
+          </svg>
+        </button>
+
+        <div class="chat-heading">
           <p class="chat-kicker">一盏留给夜行者的灯</p>
           <h1>AI 对话</h1>
         </div>
-        <div class="chat-status" aria-label="当前会话状态">
-          <span class="status-dot" aria-hidden="true"></span>
-          当前会话
+
+        <div class="chat-header-actions">
+          <div class="chat-status" aria-label="当前会话状态">
+            <span class="status-dot" aria-hidden="true"></span>
+            当前会话
+          </div>
+          <button
+            class="account-mobile-button"
+            id="mobileAccountButton"
+            type="button"
+            aria-label="打开用户面板"
+            title="用户面板"
+          >
+            <span class="account-avatar" aria-hidden="true">未</span>
+          </button>
         </div>
       </header>
 
@@ -49,6 +83,8 @@
       </div>
     </main>
   </div>
+
+  <div class="sidebar-scrim" id="sidebarScrim"></div>
 
   <dialog class="delete-dialog" id="deleteDialog" aria-labelledby="deleteDialogTitle" aria-describedby="deleteDialogMessage">
     <div class="delete-dialog-content">
@@ -64,7 +100,30 @@
     </div>
   </dialog>
 
-  <script>
+  <dialog class="account-dialog" id="accountDialog" aria-labelledby="accountDialogTitle">
+    <div class="account-dialog-content">
+      <p class="dialog-kicker">会话书签</p>
+      <h2 class="dialog-title" id="accountDialogTitle">登录你的书页</h2>
+      <p class="dialog-message">登录后，你的会话可以跟随账户保存。</p>
+
+      <form class="account-form" id="accountForm">
+        <label for="accountEmail">邮箱</label>
+        <input id="accountEmail" name="email" type="email" autocomplete="email" required>
+
+        <label for="accountPassword">密码</label>
+        <input id="accountPassword" name="password" type="password" autocomplete="current-password" required>
+
+        <p class="account-feedback" id="accountFeedback" role="status" hidden></p>
+
+        <div class="dialog-actions">
+          <button class="dialog-cancel" id="closeAccountButton" type="button">暂时关闭</button>
+          <button class="dialog-confirm account-submit" type="submit">登录</button>
+        </div>
+      </form>
+    </div>
+  </dialog>
+
+  <script type="module">
     const CONVERSATIONS_KEY = 'fairytale-ai-conversations';
     const ACTIVE_CONVERSATION_KEY = 'fairytale-ai-active-conversation';
     const messagesDiv = document.getElementById('messages');
@@ -78,15 +137,28 @@
     const deleteConversationTitle = document.getElementById('deleteConversationTitle');
     const cancelDeleteButton = document.getElementById('cancelDeleteButton');
     const confirmDeleteButton = document.getElementById('confirmDeleteButton');
+    const accountButton = document.getElementById('accountButton');
+    const mobileAccountButton = document.getElementById('mobileAccountButton');
+    const sidebar = document.getElementById('conversationSidebar');
+    const sidebarToggle = document.getElementById('sidebarToggle');
+    const sidebarScrim = document.getElementById('sidebarScrim');
+    const accountDialog = document.getElementById('accountDialog');
+    const closeAccountButton = document.getElementById('closeAccountButton');
+    const accountForm = document.getElementById('accountForm');
+    const accountFeedback = document.getElementById('accountFeedback');
 
-    let conversations = loadConversations();
+
+    let conversations = await loadConversationsFromServer();
     let activeConversationId = localStorage.getItem(ACTIVE_CONVERSATION_KEY);
     let isSending = false;
+    let pendingRefreshTimer = null;
+    let thinkingTimer = null;
+    let thinkingElement = null;
     let pendingDeleteConversationId = null;
     let deleteDialogReturnFocus = null;
 
     if (!activeConversationId || !conversations.some((item) => item.id === activeConversationId)) {
-      const firstConversation = createConversation();
+      const firstConversation = await createConversation();
       conversations.unshift(firstConversation);
       activeConversationId = firstConversation.id;
       saveState();
@@ -97,8 +169,14 @@
 
     sendButton.addEventListener('click', sendMessage);
     newConversationButton.addEventListener('click', createNewConversation);
+    sidebarToggle.addEventListener('click', toggleSidebar);
+    sidebarScrim.addEventListener('click', closeSidebar);
     cancelDeleteButton.addEventListener('click', closeDeleteDialog);
     confirmDeleteButton.addEventListener('click', confirmDeleteConversation);
+    accountButton.addEventListener('click', openAccountDialog);
+    mobileAccountButton.addEventListener('click', openAccountDialog);
+    closeAccountButton.addEventListener('click', closeAccountDialog);
+    accountForm.addEventListener('submit', handleAccountSubmit);
     deleteDialog.addEventListener('cancel', (event) => {
       event.preventDefault();
       closeDeleteDialog();
@@ -114,28 +192,158 @@
         closeDeleteDialog();
       }
     });
+    accountDialog.addEventListener('cancel', (event) => {
+      event.preventDefault();
+      closeAccountDialog();
+    });
+    accountDialog.addEventListener('click', (event) => {
+      if (event.target === accountDialog) {
+        closeAccountDialog();
+      }
+    });
     input.addEventListener('keydown', (event) => {
       if (event.key === 'Enter') {
         sendMessage();
       }
     });
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        closeSidebar();
+      }
+    });
+
+    function openSidebar() {
+      sidebar.classList.add('is-open');
+      sidebarScrim.classList.add('is-visible');
+      document.body.classList.add('sidebar-open');
+      sidebarToggle.setAttribute('aria-expanded', 'true');
+      sidebarToggle.setAttribute('aria-label', '关闭会话书签');
+      sidebarToggle.setAttribute('title', '关闭会话书签');
+    }
+
+    function closeSidebar() {
+      sidebar.classList.remove('is-open');
+      sidebarScrim.classList.remove('is-visible');
+      document.body.classList.remove('sidebar-open');
+      sidebarToggle.setAttribute('aria-expanded', 'false');
+      sidebarToggle.setAttribute('aria-label', '打开会话书签');
+      sidebarToggle.setAttribute('title', '打开会话书签');
+    }
+
+    function toggleSidebar() {
+      if (sidebar.classList.contains('is-open')) {
+        closeSidebar();
+      } else {
+        openSidebar();
+      }
+    }
 
     function createId() {
       if (window.crypto && window.crypto.randomUUID) {
         return window.crypto.randomUUID();
       }
 
-      return `conversation-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      return crypto.randomUUID();
     }
 
-    function createConversation() {
-      return {
-        id: createId(),
-        title: '新会话',
-        updatedAt: Date.now(),
-        messages: [],
-      };
+    function openAccountDialog() {
+      accountFeedback.hidden = true;
+      accountFeedback.textContent = '';
+      accountDialog.showModal();
     }
+
+    function closeAccountDialog() {
+      if (accountDialog.open) {
+        accountDialog.close();
+      }
+    }
+
+    function handleAccountSubmit(event) {
+      event.preventDefault();
+      accountFeedback.textContent = '登录接口将在后端认证完成后接入。';
+      accountFeedback.hidden = false;
+    }
+
+    async function createConversation() {
+  const response = await fetch('/api/conversations', {
+    method: 'POST',
+  });
+
+  if (!response.ok) {
+    throw new Error('创建会话失败');
+  }
+
+  const data = await response.json();
+
+  return {
+    id: data.conversationId,
+    title: '新会话',
+    updatedAt: Date.now(),
+    messages: [],
+  };
+}
+
+async function loadConversationsFromServer() {
+  try {
+    const response = await fetch('/api/conversations');
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    const data = await response.json();
+
+    if (!Array.isArray(data)) {
+      throw new Error('会话列表格式错误');
+    }
+
+    return data.map((item) => ({
+      id: item.id,
+      title: typeof item.title === 'string' ? item.title : '新会话',
+      updatedAt: Date.parse(item.updatedAt) || Date.now(),
+      messages: [],
+    }));
+  } catch (error) {
+    console.error('读取数据库会话失败：', error);
+
+    // 后端暂时不可用时，保留本地数据作为临时备用
+    return loadConversations();
+  }
+}
+
+async function loadConversationMessages(conversationId) {
+  const response = await fetch(
+    `/api/conversations/${encodeURIComponent(conversationId)}/messages`,
+  );
+
+  if (!response.ok) {
+    throw new Error(`读取聊天记录失败：HTTP ${response.status}`);
+  }
+
+  const data = await response.json();
+
+  if (!Array.isArray(data)) {
+    throw new Error('聊天记录格式错误');
+  }
+
+    return data
+      .filter(
+        (message) =>
+          message &&
+        (message.role === 'user' ||
+           message.role === 'assistant' ||
+           message.role === 'system') &&
+         typeof message.content === 'string' &&
+         (message.status === 'PENDING' ||
+           message.status === 'COMPLETED' ||
+           message.status === 'FAILED'),
+      )
+      .map((message) => ({
+        role: message.role,
+        text: message.content,
+        status: message.status,
+      }));
+  }
 
     function loadConversations() {
       try {
@@ -239,34 +447,155 @@
         });
     }
 
-    function renderActiveConversation() {
-      const conversation = getConversation();
-      messagesDiv.replaceChildren();
+function hasPendingMessage(conversation) {
+  return conversation?.messages.some(
+    (message) =>
+      message.role === 'assistant' && message.status === 'PENDING',
+  ) ?? false;
+}
 
-      if (!conversation) return;
+function renderMessages(conversation) {
+  stopThinkingAnimation();
+  messagesDiv.replaceChildren();
 
-      conversation.messages.forEach((message) => {
-        const messageClass = message.role === 'system' ? 'system-message' : message.role;
-        addMessage(messageClass, message.text, false);
-      });
+  conversation.messages.forEach((message) => {
+    const messageClass =
+      message.role === 'system' ? 'system-message' : message.role;
 
-      messagesDiv.scrollTop = messagesDiv.scrollHeight;
+    if (message.status === 'PENDING') {
+      const messageElement = addMessage(messageClass, '', false);
+      startThinkingAnimation(messageElement);
+      return;
     }
+
+    const messageText =
+      message.status === 'FAILED'
+        ? 'AI 回复失败，请重新发送。'
+        : message.text;
+
+    addMessage(messageClass, messageText, false);
+  });
+
+  messagesDiv.scrollTop = messagesDiv.scrollHeight;
+}
+
+function stopThinkingAnimation() {
+  if (thinkingTimer) {
+    clearInterval(thinkingTimer);
+    thinkingTimer = null;
+  }
+
+  if (thinkingElement) {
+    thinkingElement.classList.remove('thinking');
+    thinkingElement = null;
+  }
+}
+
+function startThinkingAnimation(element) {
+  stopThinkingAnimation();
+  thinkingElement = element;
+  thinkingElement.classList.add('thinking');
+
+  let thinkingDots = 0;
+  thinkingElement.textContent = 'AI 正在思考';
+  thinkingTimer = setInterval(() => {
+    thinkingDots = (thinkingDots + 1) % 4;
+    thinkingElement.textContent =
+      `AI 正在思考${'.'.repeat(thinkingDots)}`;
+  }, 300);
+}
+
+function stopPendingRefresh() {
+  if (pendingRefreshTimer) {
+    clearInterval(pendingRefreshTimer);
+    pendingRefreshTimer = null;
+  }
+}
+
+function startPendingRefresh(conversationId) {
+  stopPendingRefresh();
+
+  pendingRefreshTimer = setInterval(async () => {
+    if (conversationId !== activeConversationId) {
+      stopPendingRefresh();
+      return;
+    }
+
+    const conversation = getConversation(conversationId);
+    if (!conversation) {
+      stopPendingRefresh();
+      return;
+    }
+
+    try {
+      const previousMessages = conversation.messages;
+      conversation.messages = await loadConversationMessages(
+        conversationId,
+      );
+      const wasPending = hasPendingMessage({ messages: previousMessages });
+      const isPending = hasPendingMessage(conversation);
+
+      if (wasPending !== isPending || !wasPending) {
+        renderMessages(conversation);
+      }
+
+      if (isPending) {
+        setSendingState(true);
+      } else {
+        stopPendingRefresh();
+        setSendingState(false);
+      }
+    } catch (error) {
+      console.error('刷新聊天记录失败：', error);
+    }
+  }, 1000);
+}
+
+async function renderActiveConversation() {
+  const conversation = getConversation();
+  stopPendingRefresh();
+
+  if (!conversation) {
+    messagesDiv.replaceChildren();
+    setSendingState(false);
+    return;
+  }
+
+  try {
+    conversation.messages = await loadConversationMessages(
+      conversation.id,
+    );
+  } catch (error) {
+    console.error('加载聊天记录失败：', error);
+    return;
+  }
+
+  renderMessages(conversation);
+
+  if (hasPendingMessage(conversation)) {
+    setSendingState(true);
+    startPendingRefresh(conversation.id);
+  } else {
+    setSendingState(false);
+  }
+}
 
     function selectConversation(conversationId) {
       if (isSending || conversationId === activeConversationId) return;
 
       activeConversationId = conversationId;
+      closeSidebar();
       saveState();
       renderConversationList();
       renderActiveConversation();
       input.focus();
     }
 
-    function createNewConversation() {
+    async function createNewConversation() {
       if (isSending) return;
 
-      const conversation = createConversation();
+      closeSidebar();
+      const conversation = await createConversation();
       conversations.unshift(conversation);
       activeConversationId = conversation.id;
       saveState();
@@ -325,6 +654,12 @@
         if (!response.ok) {
           throw new Error(`HTTP ${response.status}`);
         }
+
+        const data = await response.json();
+
+        if (!data.deleted) {
+          throw new Error('会话不存在或已经删除');
+        }
       } catch (error) {
         console.error('删除会话失败：', error);
         return;
@@ -333,7 +668,7 @@
       conversations = conversations.filter((item) => item.id !== conversationId);
 
       if (conversations.length === 0) {
-        const replacement = createConversation();
+        const replacement = await createConversation();
         conversations.push(replacement);
         activeConversationId = replacement.id;
       } else if (conversationId === activeConversationId) {
@@ -363,7 +698,11 @@
       const conversation = getConversation(conversationId);
       if (!conversation || !text) return;
 
-      conversation.messages.push({ role: 'assistant', text });
+      conversation.messages.push({
+        role: 'assistant',
+        text,
+        status: 'COMPLETED',
+      });
       conversation.updatedAt = Date.now();
       saveState();
       renderConversationList();
@@ -400,11 +739,9 @@
       // 创建一个 AI 消息容器
       const aiMsgDiv = document.createElement('div');
       aiMsgDiv.className = 'assistant';
-      aiMsgDiv.textContent = 'AI 正在思考';
-      aiMsgDiv.classList.add('thinking');
       messagesDiv.appendChild(aiMsgDiv);
       messagesDiv.scrollTop = messagesDiv.scrollHeight;
-      let thinkingTimer = null;
+      startThinkingAnimation(aiMsgDiv);
 
       try {
         const response = await fetch('/api/chat/stream', {
@@ -427,20 +764,8 @@
         let receivedText = '';
         const receivedSystemMessages = [];
         let typing = false;
-        let thinkingDots = 0;
-        thinkingTimer = setInterval(() => {
-          if (displayedText.length > 0) {
-            clearInterval(thinkingTimer);
-            return;
-          }
-
-          thinkingDots = (thinkingDots + 1) % 4;
-          aiMsgDiv.textContent = `AI 正在思考${'.'.repeat(thinkingDots)}`;
-        }, 300);
-
         const stopThinking = () => {
-          clearInterval(thinkingTimer);
-          aiMsgDiv.classList.remove('thinking');
+          stopThinkingAnimation();
           aiMsgDiv.textContent = '';
         };
 
@@ -500,16 +825,14 @@
           flushTyping();
         }
         if (displayedText.length > 0) {
-          clearInterval(thinkingTimer);
+          stopThinkingAnimation();
         }
         recordAssistantMessage(conversationId, receivedText);
         receivedSystemMessages.forEach((systemMessage) => {
           recordSystemMessage(conversationId, systemMessage);
         });
       } catch (error) {
-        if (thinkingTimer) {
-          clearInterval(thinkingTimer);
-        }
+        stopThinkingAnimation();
         aiMsgDiv.classList.remove('thinking');
         aiMsgDiv.textContent = '网络错误：' + error.message;
       } finally {
@@ -526,6 +849,7 @@
       if (shouldScroll) {
         messagesDiv.scrollTop = messagesDiv.scrollHeight;
       }
+      return msgDiv;
     }
   </script>
 </body>

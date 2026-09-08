@@ -1,0 +1,81 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum MessageStatus {
+  PENDING
+  COMPLETED
+  FAILED
+}
+
+///会话表
+model Conversation {
+  id                  String               @id @default(uuid()) @db.Uuid ///会话唯一uuid
+  title               String               @default("新会话") ///会话标题
+  userId              String               @map("user_id") @db.Uuid /// 所属用户 ID
+  user                User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  conversationSummary ConversationSummary? ///会话摘要
+  createdAt           DateTime             @default(now()) @map("created_at") ///会话创建时间
+  updatedAt           DateTime             @updatedAt @map("updated_at") ///会话最后一次更新的时间
+  deletedAt           DateTime?            @map("deleted_at") ///记录会话被软删除的时间
+
+  messages Message[] ///关联消息表
+
+  @@index([userId, updatedAt])
+  @@map("conversations")
+}
+
+///消息表
+model Message {
+  id             String        @id @default(uuid()) @db.Uuid ///消息唯一uuid
+  sequence       Int           @default(autoincrement()) ///消息写入数据库的先后顺序
+  conversationId String        @map("conversation_id") @db.Uuid ///消息对应的会话uuid
+  role           String ///谁发出的消息
+  status         MessageStatus @default(COMPLETED) ///消息生成状态
+  content        String ///消息正文
+  createdAt      DateTime      @default(now()) @map("created_at") ///消息的发送时间
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, sequence]) ///消息索引 会话分类 sequence先后排序
+  @@map("messages")
+}
+
+///会话滚动摘要表
+model ConversationSummary {
+  id              String   @id @default(uuid()) @db.Uuid ///摘要唯一uuid
+  conversationId  String   @unique @map("conversation_id") @db.Uuid ///摘要对应的会话uuid
+  content         Json ///结构化摘要内容
+  throughSequence Int      @default(0) @map("through_sequence") ///摘要已经处理到哪条消息
+  schemaVersion   Int      @default(1) @map("schema_version") ///摘要结构版本
+  createdAt       DateTime @default(now()) @map("created_at") ///摘要创建时间
+  updatedAt       DateTime @updatedAt @map("updated_at") ///摘要最后更新时间
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@map("conversation_summaries")
+}
+
+/// 用户表
+model User {
+  id           String   @id @default(uuid()) @db.Uuid /// 用户唯一 ID
+  email        String   @unique /// 登录邮箱
+  passwordHash String   @map("password_hash") /// 加密后的密码
+  displayName  String   @map("display_name") /// 用户显示名称
+  createdAt    DateTime @default(now()) @map("created_at") /// 注册时间
+  updatedAt    DateTime @updatedAt @map("updated_at") /// 用户资料更新时间
+
+  conversations Conversation[] /// 用户拥有的会话
+
+  @@map("users")
+}

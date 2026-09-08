@@ -1,5 +1,5 @@
 
-import { Controller, Post, Delete, Body, Param, Res } from '@nestjs/common';
+import { Controller, Post, Get, Delete, Body, Param, Res } from '@nestjs/common';
 import type { Response } from 'express';
 import { ChatService } from './chat.service';
 
@@ -16,6 +16,7 @@ export class ChatController {
     return { answer };
   }
 
+  //请求sse流式输出
   @Post('chat/stream')
   async chatStream(
     @Body() body: { conversationId: string; message: string },
@@ -28,37 +29,90 @@ export class ChatController {
     res.status(200);
     res.flushHeaders(); // 立即发送响应头
 
-    try {
-      // 调用流式方法，每收到一个文本块就通过 res.write 发送给前端
-      await this.chatService.streamAIResponse(
+    let clientConnected = true;
+
+    // 浏览器刷新或关闭时，只停止实时推送，不取消后端任务
+    res.on('close', () => {
+      clientConnected = false;
+    });
+
+    const canWrite = () =>
+      clientConnected && !res.destroyed && !res.writableEnded;
+
+    // SSE 只负责实时推送，AI 任务会继续执行并保存数据库
+    void this.chatService
+      .streamAIResponse(
         body.conversationId,
         body.message,
         (chunk) => {
-          res.write(`data: ${JSON.stringify({ content: chunk })}\n\n`);
-      },
-      (message) => {
-        res.write(`data: ${JSON.stringify({
-          type: 'system',
-          message,
-        })}\n\n`
-        );
-      },
-    );
-      // 发送完成标记
-      res.write(`data: [DONE]\n\n`);
-      res.end();
-    } catch (error) {
-      // 发送错误信息
-      res.write(`data: ${JSON.stringify({ error: error.message })}\n\n`);
-      res.end();
-    }
+          if (canWrite()) {
+            res.write(
+              `data: ${JSON.stringify({ content: chunk })}\n\n`,
+            );
+          }
+        },
+        (message) => {
+          if (canWrite()) {
+            res.write(
+              `data: ${JSON.stringify({
+                type: 'system',
+                message,
+              })}\n\n`,
+            );
+          }
+        },
+      )
+      .then(() => {
+        if (canWrite()) {
+          res.write(`data: [DONE]\n\n`);
+          res.end();
+        }
+      })
+      .catch((error: unknown) => {
+        console.error('流式 AI 任务失败：', error);
+
+        if (canWrite()) {
+          const message =
+            error instanceof Error ? error.message : '未知错误';
+          res.write(
+            `data: ${JSON.stringify({ error: message })}\n\n`,
+          );
+          res.end();
+        }
+      });
   }
 
-  @Delete('chat/:conversationId')
-deleteChatHistory(
+  //收到前端post请求 调用createConversation生成会话 返回uuid
+  @Post('conversations')
+async createConversation() {
+  const conversationId = await this.chatService.createConversation();
+
+  return {
+    conversationId,
+  };
+}
+
+//收到前端get请求 调用getConversations查询所有未被软删除的会话并返回
+// (一般用于服务器重启或者其他刷新并重新渲染会话列表)
+@Get('conversations')
+async getConversations() {
+  return this.chatService.getConversations();
+}
+
+//收到前端get请求 需要一个uuid形参 查询uuid指向的会话的消息，供前端恢复聊天记录
+@Get('conversations/:conversationId/messages')
+async getConversationMessages(
   @Param('conversationId') conversationId: string,
 ) {
-  const deleted = this.chatService.deleteHistory(conversationId);
+  return this.chatService.getConversationMessages(conversationId);
+}
+
+//收到前端请求 需要一个uuid的形参 软删除该会话里的所有数据
+@Delete('chat/:conversationId')
+async deleteChatHistory(
+  @Param('conversationId') conversationId: string,
+) {
+  const deleted = await this.chatService.deleteHistory(conversationId);
 
   return { deleted };
 }
