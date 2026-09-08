@@ -59,4 +59,18 @@ describe('AuthService', () => {
       }),
     ).rejects.toBeInstanceOf(ConflictException);
   });
+
+  it('非法字段类型会返回参数错误', async () => {
+    const prisma = { user: { create: jest.fn() } };
+    const service = new AuthService(prisma as unknown as PrismaService);
+
+    await expect(
+      service.register({
+        email: 123 as unknown as string,
+        password: 'password',
+        displayName: 'Alice',
+      }),
+    ).rejects.toThrow('请输入有效的邮箱');
+    expect(prisma.user.create).not.toHaveBeenCalled();
+  });
 });

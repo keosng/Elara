@@ -27,9 +27,16 @@ export class AuthService {
   constructor(private readonly prisma: PrismaService) {}
 
   async register(input: RegisterInput): Promise<PublicUser> {
-    const email = input.email?.trim().toLowerCase();
-    const password = input.password;
-    const displayName = input.displayName?.trim();
+    const email =
+      typeof input?.email === 'string'
+        ? input.email.trim().toLowerCase()
+        : '';
+    const password =
+      typeof input?.password === 'string' ? input.password : '';
+    const displayName =
+      typeof input?.displayName === 'string'
+        ? input.displayName.trim()
+        : '';
 
     if (!email || !email.includes('@')) {
       throw new BadRequestException('请输入有效的邮箱');
