@@ -15,6 +15,7 @@ describe('ChatService', () => {
     };
     conversation: {
       findUnique: jest.Mock;
+      findFirst: jest.Mock;
       updateMany: jest.Mock;
       update: jest.Mock;
     },
@@ -134,6 +135,9 @@ describe('ChatService', () => {
       },
       conversation: {
         findUnique: jest.fn().mockResolvedValue({
+          title: '新会话',
+        }),
+        findFirst: jest.fn().mockResolvedValue({
           title: '新会话',
         }),
         updateMany: jest.fn().mockResolvedValue({ count: 1 }),

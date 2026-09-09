@@ -104,9 +104,17 @@
     <div class="account-dialog-content">
       <p class="dialog-kicker">会话书签</p>
       <h2 class="dialog-title" id="accountDialogTitle">登录你的书页</h2>
-      <p class="dialog-message">登录后，你的会话可以跟随账户保存。</p>
+      <p class="dialog-message" id="accountDialogMessage">登录后，你的会话可以跟随账户保存。</p>
+
+      <div class="account-mode-switch" role="tablist" aria-label="账户操作">
+        <button class="account-mode is-active" id="loginModeButton" type="button" role="tab" aria-selected="true">登录</button>
+        <button class="account-mode" id="registerModeButton" type="button" role="tab" aria-selected="false">注册</button>
+      </div>
 
       <form class="account-form" id="accountForm">
+        <label for="accountDisplayName" id="accountDisplayNameLabel" hidden>显示名称</label>
+        <input id="accountDisplayName" name="displayName" type="text" autocomplete="nickname" maxlength="8" placeholder="1 到 8 个字符" hidden>
+
         <label for="accountEmail">邮箱</label>
         <input id="accountEmail" name="email" type="email" autocomplete="email" required>
 
@@ -117,9 +125,18 @@
 
         <div class="dialog-actions">
           <button class="dialog-cancel" id="closeAccountButton" type="button">暂时关闭</button>
-          <button class="dialog-confirm account-submit" type="submit">登录</button>
+          <button class="dialog-confirm account-submit" id="accountSubmitButton" type="submit">登录</button>
         </div>
       </form>
+
+      <section class="account-logged-in" id="accountLoggedIn" hidden>
+        <p class="account-user-name" id="accountUserName"></p>
+        <p class="account-user-email" id="accountUserEmail"></p>
+        <div class="dialog-actions">
+          <button class="dialog-cancel" id="closeLoggedInButton" type="button">暂时关闭</button>
+          <button class="dialog-confirm account-logout" id="logoutButton" type="button">退出登录</button>
+        </div>
+      </section>
     </div>
   </dialog>
 
@@ -143,12 +160,28 @@
     const sidebarToggle = document.getElementById('sidebarToggle');
     const sidebarScrim = document.getElementById('sidebarScrim');
     const accountDialog = document.getElementById('accountDialog');
+    const accountDialogTitle = document.getElementById('accountDialogTitle');
+    const accountDialogMessage = document.getElementById('accountDialogMessage');
     const closeAccountButton = document.getElementById('closeAccountButton');
+    const closeLoggedInButton = document.getElementById('closeLoggedInButton');
     const accountForm = document.getElementById('accountForm');
     const accountFeedback = document.getElementById('accountFeedback');
+    const accountDisplayName = document.getElementById('accountDisplayName');
+    const accountDisplayNameLabel = document.getElementById('accountDisplayNameLabel');
+    const accountPassword = document.getElementById('accountPassword');
+    const accountSubmitButton = document.getElementById('accountSubmitButton');
+    const accountLoggedIn = document.getElementById('accountLoggedIn');
+    const accountUserName = document.getElementById('accountUserName');
+    const accountUserEmail = document.getElementById('accountUserEmail');
+    const logoutButton = document.getElementById('logoutButton');
+    const loginModeButton = document.getElementById('loginModeButton');
+    const registerModeButton = document.getElementById('registerModeButton');
+
+    let accountMode = 'login';
 
 
-    let conversations = await loadConversationsFromServer();
+    let currentUser = await getCurrentUser();
+    let conversations = currentUser ? await loadConversationsFromServer() : [];
     let activeConversationId = localStorage.getItem(ACTIVE_CONVERSATION_KEY);
     let isSending = false;
     let pendingRefreshTimer = null;
@@ -157,7 +190,7 @@
     let pendingDeleteConversationId = null;
     let deleteDialogReturnFocus = null;
 
-    if (!activeConversationId || !conversations.some((item) => item.id === activeConversationId)) {
+    if (currentUser && (!activeConversationId || !conversations.some((item) => item.id === activeConversationId))) {
       const firstConversation = await createConversation();
       conversations.unshift(firstConversation);
       activeConversationId = firstConversation.id;
@@ -166,6 +199,7 @@
 
     renderConversationList();
     renderActiveConversation();
+    updateAccountButtons();
 
     sendButton.addEventListener('click', sendMessage);
     newConversationButton.addEventListener('click', createNewConversation);
@@ -176,7 +210,11 @@
     accountButton.addEventListener('click', openAccountDialog);
     mobileAccountButton.addEventListener('click', openAccountDialog);
     closeAccountButton.addEventListener('click', closeAccountDialog);
+    closeLoggedInButton.addEventListener('click', closeAccountDialog);
     accountForm.addEventListener('submit', handleAccountSubmit);
+    logoutButton.addEventListener('click', handleLogout);
+    loginModeButton.addEventListener('click', () => setAccountMode('login'));
+    registerModeButton.addEventListener('click', () => setAccountMode('register'));
     deleteDialog.addEventListener('cancel', (event) => {
       event.preventDefault();
       closeDeleteDialog();
@@ -247,8 +285,14 @@
     }
 
     function openAccountDialog() {
+      // 调用者：侧栏账户按钮或移动端账户按钮；根据 currentUser 决定显示登录/注册表单或已登录面板。
       accountFeedback.hidden = true;
       accountFeedback.textContent = '';
+      if (currentUser) {
+        showLoggedInAccount();
+      } else {
+        showAccountForm();
+      }
       accountDialog.showModal();
     }
 
@@ -258,13 +302,144 @@
       }
     }
 
-    function handleAccountSubmit(event) {
+    async function handleAccountSubmit(event) {
+      // 调用链：登录/注册表单 submit → 对应 AuthController 接口 → 后端写入 HttpOnly Session Cookie（登录时） →
+      // 重新读取当前用户会话列表 → 选中首个会话 → 刷新侧栏和消息区。
       event.preventDefault();
-      accountFeedback.textContent = '登录接口将在后端认证完成后接入。';
-      accountFeedback.hidden = false;
+      const formData = new FormData(accountForm);
+      const email = formData.get('email');
+      const password = formData.get('password');
+      const displayName = formData.get('displayName');
+
+      try {
+        const endpoint = accountMode === 'register' ? '/api/auth/register' : '/api/auth/login';
+        const body = accountMode === 'register'
+          ? { email, password, displayName }
+          : { email, password };
+        const response = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data.message || '登录失败');
+        }
+
+        if (accountMode === 'register') {
+          accountFeedback.textContent = '注册成功，请使用新账户登录。';
+          accountFeedback.hidden = false;
+          accountForm.reset();
+          setAccountMode('login');
+          return;
+        }
+
+        currentUser = data;
+        conversations = await loadConversationsFromServer();
+        activeConversationId = null;
+        if (!conversations.length) {
+          const firstConversation = await createConversation();
+          conversations.unshift(firstConversation);
+          activeConversationId = firstConversation.id;
+        } else {
+          activeConversationId = conversations[0].id;
+        }
+        saveState();
+        renderConversationList();
+        await renderActiveConversation();
+        updateAccountButtons();
+        closeAccountDialog();
+      } catch (error) {
+        accountFeedback.textContent = error instanceof Error ? error.message : '操作失败';
+        accountFeedback.hidden = false;
+      }
+    }
+
+    async function handleLogout() {
+      // 调用链：退出按钮 → POST /api/auth/logout → 后端删除 Session 和 Cookie →
+      // 清空 currentUser、停止消息轮询、清空当前页面会话并回到未登录状态。
+      logoutButton.disabled = true;
+      try {
+        const response = await fetch('/api/auth/logout', { method: 'POST' });
+        if (!response.ok) throw new Error('退出登录失败');
+        currentUser = null;
+        conversations = [];
+        activeConversationId = null;
+        stopPendingRefresh();
+        messagesDiv.replaceChildren();
+        saveState();
+        renderConversationList();
+        updateAccountButtons();
+        closeAccountDialog();
+      } catch (error) {
+        accountFeedback.textContent = error instanceof Error ? error.message : '退出登录失败';
+        accountFeedback.hidden = false;
+      } finally {
+        logoutButton.disabled = false;
+      }
+    }
+
+    function setAccountMode(mode) {
+      // 调用者：登录/注册切换按钮；只改变表单字段和提交接口，不触碰当前 Session。
+      accountMode = mode;
+      const isRegister = mode === 'register';
+      loginModeButton.classList.toggle('is-active', !isRegister);
+      registerModeButton.classList.toggle('is-active', isRegister);
+      loginModeButton.setAttribute('aria-selected', String(!isRegister));
+      registerModeButton.setAttribute('aria-selected', String(isRegister));
+      accountDialogTitle.textContent = isRegister ? '留下你的名字' : '登录你的书页';
+      accountDialogMessage.textContent = isRegister ? '注册后，你的会话会与账户一起保存。' : '登录后，你的会话可以跟随账户保存。';
+      accountDisplayName.hidden = !isRegister;
+      accountDisplayNameLabel.hidden = !isRegister;
+      accountDisplayName.required = isRegister;
+      accountPassword.autocomplete = isRegister ? 'new-password' : 'current-password';
+      accountSubmitButton.textContent = isRegister ? '注册' : '登录';
+    }
+
+    function showAccountForm() {
+      accountForm.hidden = false;
+      accountLoggedIn.hidden = true;
+      document.querySelector('.account-mode-switch').hidden = false;
+      setAccountMode(accountMode);
+    }
+
+    function showLoggedInAccount() {
+      accountForm.hidden = true;
+      accountLoggedIn.hidden = false;
+      document.querySelector('.account-mode-switch').hidden = true;
+      accountDialogTitle.textContent = '你的书页';
+      accountDialogMessage.textContent = '当前登录状态会保存你的会话记录。';
+      accountUserName.textContent = currentUser?.displayName || '';
+      accountUserEmail.textContent = currentUser?.email || '';
+    }
+
+    async function getCurrentUser() {
+      // 调用链：页面初始化 → GET /api/auth/me → SessionAuthGuard → 返回当前用户；
+      // 未登录或请求失败返回 null，初始化阶段不创建会话。
+      try {
+        const response = await fetch('/api/auth/me');
+        return response.ok ? await response.json() : null;
+      } catch {
+        return null;
+      }
+    }
+
+    function updateAccountButtons() {
+      const name = currentUser?.displayName || '未登录';
+      for (const button of [accountButton, mobileAccountButton]) {
+        const avatar = button.querySelector('.account-avatar');
+        if (avatar) avatar.textContent = name.slice(0, 1);
+      }
+      const label = accountButton.querySelector('strong');
+      const hint = accountButton.querySelector('small');
+      if (label) label.textContent = name;
+      if (hint) hint.textContent = currentUser ? '已登录' : '登录以同步会话';
     }
 
     async function createConversation() {
+  // 调用者：页面首次初始化或“新建会话”按钮；调用 POST /api/conversations，
+  // 后端从 Session 取得 userId 后创建归属该用户的 Conversation。
+  if (!currentUser) throw new Error('请先登录');
   const response = await fetch('/api/conversations', {
     method: 'POST',
   });
@@ -284,6 +459,9 @@
 }
 
 async function loadConversationsFromServer() {
+  // 调用者：页面初始化或登录成功；调用 GET /api/conversations，
+  // 后端按 Session 用户过滤，返回值转换为前端 conversations 状态。
+  if (!currentUser) return [];
   try {
     const response = await fetch('/api/conversations');
 
@@ -312,6 +490,8 @@ async function loadConversationsFromServer() {
 }
 
 async function loadConversationMessages(conversationId) {
+  // 调用者：renderActiveConversation；调用 GET /api/conversations/:id/messages，
+  // 后端检查会话归属后返回消息，随后由 renderMessages 生成 DOM。
   const response = await fetch(
     `/api/conversations/${encodeURIComponent(conversationId)}/messages`,
   );
@@ -552,10 +732,11 @@ function startPendingRefresh(conversationId) {
 }
 
 async function renderActiveConversation() {
+  // 调用者：初始化、切换会话、新建会话和登录成功；先加载消息，再根据 PENDING 状态决定是否轮询。
   const conversation = getConversation();
   stopPendingRefresh();
 
-  if (!conversation) {
+  if (!currentUser || !conversation) {
     messagesDiv.replaceChildren();
     setSendingState(false);
     return;
@@ -592,6 +773,11 @@ async function renderActiveConversation() {
     }
 
     async function createNewConversation() {
+      // 调用者：新建会话按钮；未登录时打开登录框，已登录时调用 createConversation 并切换当前会话。
+      if (!currentUser) {
+        openAccountDialog();
+        return;
+      }
       if (isSending) return;
 
       closeSidebar();
@@ -725,7 +911,13 @@ async function renderActiveConversation() {
     }
 
     async function sendMessage() {
+      // 调用者：发送按钮或输入框 Enter；未登录时打开登录框，已登录时调用流式聊天接口，
+      // 接收 SSE 片段并把完整回答记录到前端状态。
       const message = input.value.trim();
+      if (!currentUser) {
+        openAccountDialog();
+        return;
+      }
       if (!message || isSending) return;
 
       const conversationId = activeConversationId;

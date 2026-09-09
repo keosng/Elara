@@ -76,6 +76,23 @@ model User {
   updatedAt    DateTime @updatedAt @map("updated_at") /// 用户资料更新时间
 
   conversations Conversation[] /// 用户拥有的会话
+  sessions      Session[]      /// 用户的登录会话
 
   @@map("users")
+}
+
+/// 登录会话表：Cookie 只携带 sid，实际会话内容保存在数据库
+model Session {
+  sid       String   @id
+  userId    String   @map("user_id") @db.Uuid
+  data      Json
+  expiresAt DateTime @map("expires_at")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@map("sessions")
 }

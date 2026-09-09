@@ -14,10 +14,8 @@ export class ChatService {
   // ==================== 对外会话接口 ====================
 
   // 创建一个新会话，并返回会话 UUID
-  async createConversation(): Promise<string> {
-    const userId = this.configService.getOrThrow<string>('DEV_USER_ID');
-
-
+  async createConversation(userId: string): Promise<string> {
+    /** 调用者：ChatController.createConversation；创建请求已通过 SessionAuthGuard。写入 userId 后把新 UUID 返回给前端。 */
     const conversation = await this.prisma.conversation.create({
       data: {
         userId,
@@ -28,10 +26,12 @@ export class ChatService {
   }
 
   // 查询所有未被软删除的会话，供前端刷新会话列表
-  async getConversations() {
+  async getConversations(userId: string) {
+    /** 调用者：ChatController.getConversations；只查询 userId 匹配且 deletedAt=null 的会话，防止跨用户读取。 */
     return this.prisma.conversation.findMany({
       where: {
         deletedAt: null,
+        userId,
       },
       orderBy: {
         updatedAt: 'desc',
@@ -46,12 +46,14 @@ export class ChatService {
   }
 
   // 查询指定会话的消息，供前端恢复聊天记录
-  async getConversationMessages(conversationId: string) {
+  async getConversationMessages(conversationId: string, userId: string) {
+    /** 调用者：ChatController.getConversationMessages；通过消息关联的 Conversation 同时检查 userId 和软删除状态。 */
     return this.prisma.message.findMany({
       where: {
         conversationId,
         conversation: {
           deletedAt: null,
+          userId,
         },
       },
       orderBy: {
@@ -67,11 +69,13 @@ export class ChatService {
   }
 
   // 软删除指定会话
-  async deleteHistory(conversationId: string): Promise<boolean> {
+  async deleteHistory(conversationId: string, userId: string): Promise<boolean> {
+    /** 调用者：ChatController.deleteChatHistory；只更新当前用户未删除的会话，返回 updateMany.count > 0。 */
     const result = await this.prisma.conversation.updateMany({
       where: {
         id: conversationId,
         deletedAt: null,
+        userId,
       },
       data: {
         deletedAt: new Date(),
@@ -87,7 +91,13 @@ export class ChatService {
   async getAIResponse(
     conversationId: string,
     userMessage: string,
+    userId = this.configService.getOrThrow<string>('DEV_USER_ID'),
   ): Promise<string> {
+    /**
+     * 调用者：ChatController.chat。调用顺序：withConversationLock → createPendingMessages → askAI →
+     * completePendingMessage → updateHistory；任意 AI/数据库错误都进入 failPendingMessage，再由 Controller 返回错误。
+     * userId 由 HTTP Session 传入；默认 DEV_USER_ID 只为旧单测或内部开发调用保留。
+     */
     return this.withConversationLock(
       conversationId,
       async () => {
@@ -95,6 +105,7 @@ export class ChatService {
           await this.createPendingMessages(
             conversationId,
             userMessage,
+            userId,
           );
 
         try {
@@ -120,9 +131,15 @@ export class ChatService {
   async streamAIResponse(
     conversationId: string,
     userMessage: string,
+    userId = this.configService.getOrThrow<string>('DEV_USER_ID'),
     onChunk: (chunk: string) => void,
     onSystemMessage?: (message: string) => void,
   ): Promise<void> {
+    /**
+     * 调用者：ChatController.chatStream。调用顺序：加锁 → 创建用户/PENDING 消息 → getHistory →
+     * streamModelResponse(onChunk) → 完成消息 → updateHistory；失败则标记 FAILED，最后释放锁。
+     * onChunk 和 onSystemMessage 是 Controller 提供的推送回调，Service 不直接操作 HTTP Response。
+     */
     return this.withConversationLock(
       conversationId,
       async () => {
@@ -137,6 +154,7 @@ export class ChatService {
           await this.createPendingMessages(
             conversationId,
             userMessage,
+            userId,
           );
 
         try {
@@ -178,6 +196,10 @@ export class ChatService {
     conversationId: string,
     task: () => Promise<T>,
   ): Promise<T> {
+    /**
+     * 调用者：getAIResponse 和 streamAIResponse 的第一层协调方法。
+     * 已有同会话任务时立即抛错；否则加锁并执行 task，成功或失败都在 finally 删除锁。
+     */
     // 如果已经存在，说明这个会话正在生成回复
     if (this.activeConversations.has(conversationId)) {
       throw new Error('上一条回复仍在生成，请稍候');
@@ -199,6 +221,7 @@ export class ChatService {
 
   // 查询已完成的历史消息，并调用非流式模型
   private async askAI(conversationId: string): Promise<string> {
+    /** 调用者：getAIResponse；先由 getHistory 取已完成消息，再交给 callModel 返回完整文本。 */
     const history = await this.getHistory(conversationId);
     return this.callModel(history);
   }
@@ -208,6 +231,10 @@ export class ChatService {
     messages: { role: string; content: string }[],
     temperature?: number,
   ): Promise<string> {
+    /**
+     * 调用者：askAI 和 summarizeHistory。读取 ConfigService 中的 BASE_URL/API_KEY/MODEL，
+     * 调用非流式 chat/completions；HTTP 非 2xx 时抛错，成功时返回 choices[0].message.content。
+     */
     const baseUrl = this.configService.getOrThrow<string>('BASE_URL');
     const apiKey = this.configService.getOrThrow<string>('API_KEY');
     const model = this.configService.getOrThrow<string>('MODEL');
@@ -244,6 +271,10 @@ export class ChatService {
     messages: { role: string; content: string }[],
     onChunk: (chunk: string) => void,
   ): Promise<string> {
+    /**
+     * 调用者：streamAIResponse。请求 stream=true，逐块解析上游 SSE，提取 delta.content 后调用 onChunk，
+     * 同时累加 fullAnswer，最终把完整文本交回 Service 保存。
+     */
     const baseUrl = this.configService.getOrThrow<string>('BASE_URL');
     const apiKey = this.configService.getOrThrow<string>('API_KEY');
     const model = this.configService.getOrThrow<string>('MODEL');
@@ -323,8 +354,21 @@ export class ChatService {
   private async createPendingMessages(
     conversationId: string,
     userMessage: string,
+    userId: string,
   ): Promise<string> {
+    /**
+     * 调用者：两条聊天入口进入 AI 请求前。事务内先确认会话 id/userId/deletedAt，
+     * 再写入用户 COMPLETED 消息、AI PENDING 消息和首条消息标题；任一步失败则整笔事务回滚。
+     */
     const assistantMessage = await this.prisma.$transaction(async (tx) => {
+      const conversation = await tx.conversation.findFirst({
+        where: { id: conversationId, userId, deletedAt: null },
+        select: { title: true },
+      });
+      if (!conversation) {
+        throw new Error('会话不存在或无权访问');
+      }
+
       await tx.message.create({
         data: {
           conversationId,
@@ -340,15 +384,6 @@ export class ChatService {
           role: 'assistant',
           status: 'PENDING',
           content: '',
-        },
-      });
-
-      const conversation = await tx.conversation.findUnique({
-        where: {
-          id: conversationId,
-        },
-        select: {
-          title: true,
         },
       });
 
@@ -378,6 +413,7 @@ export class ChatService {
     messageId: string,
     assistantResponse: string,
   ): Promise<void> {
+    /** 调用者：普通或流式 AI 成功后，把对应 PENDING 消息写成完整 content + COMPLETED。 */
     await this.prisma.message.update({
       where: {
         id: messageId,
@@ -391,6 +427,7 @@ export class ChatService {
 
   // AI 生成失败后，更新原来的待生成消息
   private async failPendingMessage(messageId: string): Promise<void> {
+    /** 调用者：两条聊天入口的 catch；只把对应 AI 消息标记 FAILED，保留用户消息和失败记录。 */
     await this.prisma.message.update({
       where: {
         id: messageId,
@@ -407,6 +444,7 @@ export class ChatService {
   private async getHistory(
     conversationId: string,
   ): Promise<{ role: string; content: string }[]> {
+    /** 调用者：askAI 和 streamAIResponse；只把当前未删除会话的 COMPLETED 消息交给模型。 */
     return this.prisma.message.findMany({
       where: {
         conversationId,
@@ -432,6 +470,7 @@ export class ChatService {
     content: Prisma.JsonValue;
     throughSequence: number;
   } | null> {
+    /** 调用者：getUnsummarizedMessages 和 updateHistory；读取当前会话上一次摘要及处理到的 sequence。 */
     return this.prisma.conversationSummary.findUnique({
       where: {
         conversationId,
@@ -451,6 +490,7 @@ export class ChatService {
     role: string;
     content: string;
   }[]> {
+    /** 调用者：updateHistory；根据摘要 throughSequence 找出之后新增的已完成消息。 */
     const summary = await this.getConversationSummary(conversationId);
     const throughSequence = summary?.throughSequence ?? 0;
 
@@ -478,6 +518,10 @@ export class ChatService {
     conversationId: string,
     onSystemMessage?: (message: string) => void,
   ): Promise<void> {
+    /**
+     * 调用者：普通/流式聊天完成后。少于 20 条新增消息直接结束；达到阈值时依次调用
+     * getConversationSummary → summarizeHistory → saveConversationSummary，并通过 onSystemMessage 通知前端。
+     */
     const unsummarizedMessages =
       await this.getUnsummarizedMessages(conversationId);
 
@@ -518,6 +562,7 @@ export class ChatService {
     messages: { role: string; content: string }[],
     previousSummary: Prisma.JsonValue | null = null,
   ): Promise<string> {
+    /** 调用者：updateHistory；组合旧摘要和新增消息后调用低温度 callModel，返回新的滚动摘要文本。 */
     const previousSummaryText = previousSummary
       ? `已有摘要：${JSON.stringify(previousSummary)}`
       : '目前没有已有摘要。';
@@ -545,6 +590,7 @@ export class ChatService {
     summaryText: string,
     throughSequence: number,
   ): Promise<void> {
+    /** 调用者：updateHistory；使用 upsert 新建或覆盖 ConversationSummary，并记录摘要覆盖到的 sequence。 */
     const content = {
       text: summaryText,
     };

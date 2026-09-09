@@ -1,8 +1,37 @@
-import { ConflictException } from '@nestjs/common';
+import { ConflictException, UnauthorizedException } from '@nestjs/common';
+import { randomBytes, scrypt as scryptCallback } from 'node:crypto';
+import { promisify } from 'node:util';
 import { AuthService } from './auth.service';
 import { PrismaService } from '../prisma/prisma.service';
 
+const scrypt = promisify(scryptCallback);
+
 describe('AuthService', () => {
+  async function makePasswordHash(password: string) {
+    const salt = randomBytes(16).toString('hex');
+    const key = (await scrypt(password, salt, 64)) as Buffer;
+    return `${salt}:${key.toString('hex')}`;
+  }
+
+  it('登录时会校验密码并只返回公开用户资料', async () => {
+    const passwordHash = await makePasswordHash('correct horse battery staple');
+    const prisma = { user: { findUnique: jest.fn().mockResolvedValue({
+      id: 'user-1', email: 'alice@example.com', passwordHash,
+      displayName: 'Alice', createdAt: new Date('2026-01-01T00:00:00.000Z'),
+    }) } };
+    const service = new AuthService(prisma as unknown as PrismaService);
+
+    await expect(service.login({ email: ' Alice@Example.com ', password: 'correct horse battery staple' }))
+      .resolves.toEqual({ id: 'user-1', email: 'alice@example.com', displayName: 'Alice', createdAt: new Date('2026-01-01T00:00:00.000Z') });
+  });
+
+  it('邮箱不存在或密码错误会返回未授权错误', async () => {
+    const prisma = { user: { findUnique: jest.fn().mockResolvedValue(null) } };
+    const service = new AuthService(prisma as unknown as PrismaService);
+    await expect(service.login({ email: 'missing@example.com', password: 'password' }))
+      .rejects.toBeInstanceOf(UnauthorizedException);
+  });
+
   it('注册时会规范化邮箱并只返回公开用户资料', async () => {
     const prisma = {
       user: {

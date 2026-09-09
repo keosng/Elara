@@ -26,6 +26,8 @@
     "@nestjs/platform-express": "^11.0.1",
     "@prisma/adapter-pg": "^7.10.0",
     "@prisma/client": "^7.10.0",
+    "@types/express-session": "^1.19.0",
+    "express-session": "^1.19.0",
     "joi": "^18.2.8",
     "pg": "^8.23.0",
     "prisma": "^7.10.0",

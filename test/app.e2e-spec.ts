@@ -5,6 +5,7 @@ import { App } from 'supertest/types';
 import { AppModule } from './../src/app.module';
 import { ChatService } from './../src/chat/chat.service';
 import { PrismaService } from './../src/prisma/prisma.service';
+import { SessionAuthGuard } from './../src/auth/session-auth.guard';
 describe('AppController (e2e)', () => {
   let app: INestApplication<App>;
   const mockChatService = {
@@ -28,11 +29,17 @@ describe('AppController (e2e)', () => {
     })
     .overrideProvider(ChatService)
     .useValue(mockChatService)
-    .overrideProvider(PrismaService)
-    .useValue({})
-    .compile();
+      .overrideProvider(PrismaService)
+      .useValue({})
+      .overrideGuard(SessionAuthGuard)
+      .useValue({ canActivate: () => true })
+      .compile();
 
     app = moduleFixture.createNestApplication();
+    app.use((request, _response, next) => {
+      request.session = { userId: 'test-user-id' } as typeof request.session;
+      next();
+    });
     await app.init();
   });
 
@@ -66,6 +73,7 @@ describe('AppController (e2e)', () => {
 
     expect(mockChatService.deleteHistory).toHaveBeenCalledWith(
       'conversation-a',
+      'test-user-id',
     );
   });
 
