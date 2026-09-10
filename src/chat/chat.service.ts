@@ -1,13 +1,29 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
+import { UsageService } from '../usage/usage.service';
 import type { Prisma } from '../../generated/prisma/client';
+
+// 上游 chat/completions 返回的 token 用量结构。
+type ModelUsage = {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+};
+
+// 模型调用统一返回：正文、是否拿到的 usage、实际使用的模型名。
+type ModelResult = {
+  content: string;
+  usage?: ModelUsage | null;
+  model: string;
+};
 
 @Injectable()
 export class ChatService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly configService: ConfigService,
+    private readonly usageService: UsageService,
   ) {}
 
 
@@ -95,7 +111,8 @@ export class ChatService {
   ): Promise<string> {
     /**
      * 调用者：ChatController.chat。调用顺序：withConversationLock → createPendingMessages → askAI →
-     * completePendingMessage → updateHistory；任意 AI/数据库错误都进入 failPendingMessage，再由 Controller 返回错误。
+     * completePendingMessage → usageService.record → updateHistory；任意 AI/数据库错误都进入 failPendingMessage，
+     * 再由 Controller 返回错误。
      * userId 由 HTTP Session 传入；默认 DEV_USER_ID 只为旧单测或内部开发调用保留。
      */
     return this.withConversationLock(
@@ -109,16 +126,29 @@ export class ChatService {
           );
 
         try {
-          const answer = await this.askAI(conversationId);
+          const modelResult = await this.askAI(conversationId);
 
           await this.completePendingMessage(
             assistantMessageId,
-            answer,
+            modelResult.content,
           );
 
-          await this.updateHistory(conversationId);
+          await this.usageService.record({
+            userId,
+            conversationId,
+            messageId: assistantMessageId,
+            requestType: 'CHAT',
+            model: modelResult.model,
+            usage: modelResult.usage,
+            estimateContext: {
+              messages: modelResult.inputMessages,
+              outputText: modelResult.content,
+            },
+          });
 
-          return answer;
+          await this.updateHistory(conversationId, userId);
+
+          return modelResult.content;
         } catch (error) {
           await this.failPendingMessage(assistantMessageId);
           throw error;
@@ -137,7 +167,8 @@ export class ChatService {
   ): Promise<void> {
     /**
      * 调用者：ChatController.chatStream。调用顺序：加锁 → 创建用户/PENDING 消息 → getHistory →
-     * streamModelResponse(onChunk) → 完成消息 → updateHistory；失败则标记 FAILED，最后释放锁。
+     * streamModelResponse(onChunk) → 完成消息 → usageService.record → onSystemMessage 发送 Token 用量 →
+     * updateHistory；失败则标记 FAILED，最后释放锁。
      * onChunk 和 onSystemMessage 是 Controller 提供的推送回调，Service 不直接操作 HTTP Response。
      */
     return this.withConversationLock(
@@ -160,7 +191,7 @@ export class ChatService {
         try {
           const history = await this.getHistory(conversationId);
 
-          const fullAnswer =
+          const modelResult =
             await this.streamModelResponse(
               history,
               onChunk,
@@ -168,11 +199,32 @@ export class ChatService {
 
           await this.completePendingMessage(
             assistantMessageId,
-            fullAnswer,
+            modelResult.content,
           );
+
+          await this.usageService.record({
+            userId,
+            conversationId,
+            messageId: assistantMessageId,
+            requestType: 'STREAM',
+            model: modelResult.model,
+            usage: modelResult.usage,
+            estimateContext: {
+              messages: history,
+              outputText: modelResult.content,
+            },
+          });
+
+          const usage = modelResult.usage;
+          const usageMessage =
+            usage?.total_tokens != null
+              ? `Token 用量：输入 ${usage.prompt_tokens ?? '未知'} · 输出 ${usage.completion_tokens ?? '未知'} · 总计 ${usage.total_tokens}`
+              : 'Token 用量：本次暂未获取';
+          onSystemMessage?.(usageMessage);
 
           await this.updateHistory(
             conversationId,
+            userId,
             onSystemMessage,
           );
         } catch (error) {
@@ -220,20 +272,27 @@ export class ChatService {
   // ==================== 模型调用方法 ====================
 
   // 查询已完成的历史消息，并调用非流式模型
-  private async askAI(conversationId: string): Promise<string> {
-    /** 调用者：getAIResponse；先由 getHistory 取已完成消息，再交给 callModel 返回完整文本。 */
+  private async askAI(
+    conversationId: string,
+  ): Promise<ModelResult & { inputMessages: { role: string; content: string }[] }> {
+    /** 调用者：getAIResponse；先由 getHistory 取已完成消息，再交给 callModel，并把输入消息一起带回供估算使用。 */
     const history = await this.getHistory(conversationId);
-    return this.callModel(history);
+    const modelResult = await this.callModel(history);
+
+    return {
+      ...modelResult,
+      inputMessages: history,
+    };
   }
 
   // 调用 AI 模型，等待完整响应后返回
   private async callModel(
     messages: { role: string; content: string }[],
     temperature?: number,
-  ): Promise<string> {
+  ): Promise<ModelResult> {
     /**
      * 调用者：askAI 和 summarizeHistory。读取 ConfigService 中的 BASE_URL/API_KEY/MODEL，
-     * 调用非流式 chat/completions；HTTP 非 2xx 时抛错，成功时返回 choices[0].message.content。
+     * 调用非流式 chat/completions；HTTP 非 2xx 时抛错，成功时返回正文、usage 和实际模型名。
      */
     const baseUrl = this.configService.getOrThrow<string>('BASE_URL');
     const apiKey = this.configService.getOrThrow<string>('API_KEY');
@@ -263,17 +322,21 @@ export class ChatService {
     }
 
     const data = await response.json();
-    return data.choices[0].message.content;
+    return {
+      content: data.choices[0].message.content,
+      usage: data.usage,
+      model,
+    };
   }
 
   // 调用 AI 模型并解析流式响应，逐段交给 Controller
   private async streamModelResponse(
     messages: { role: string; content: string }[],
     onChunk: (chunk: string) => void,
-  ): Promise<string> {
+  ): Promise<ModelResult> {
     /**
      * 调用者：streamAIResponse。请求 stream=true，逐块解析上游 SSE，提取 delta.content 后调用 onChunk，
-     * 同时累加 fullAnswer，最终把完整文本交回 Service 保存。
+     * 同时累加 fullAnswer；开启 stream_options.include_usage 让上游在结束前返回 usage，最终交回完整文本和 token 统计。
      */
     const baseUrl = this.configService.getOrThrow<string>('BASE_URL');
     const apiKey = this.configService.getOrThrow<string>('API_KEY');
@@ -291,6 +354,9 @@ export class ChatService {
           model,
           messages,
           stream: true,
+          stream_options: {
+            include_usage: true,
+          },
           temperature: 0.7,
         }),
       },
@@ -306,6 +372,7 @@ export class ChatService {
     const decoder = new TextDecoder();
     let buffer = '';
     let fullAnswer = '';
+    let usage: ModelUsage | null = null;
 
     while (true) {
       const { done, value } = await reader.read();
@@ -333,6 +400,10 @@ export class ChatService {
 
         try {
           const json = JSON.parse(jsonStr);
+          if (json.usage) {
+            usage = json.usage;
+          }
+
           const delta = json.choices?.[0]?.delta?.content;
 
           if (delta) {
@@ -345,7 +416,11 @@ export class ChatService {
       }
     }
 
-    return fullAnswer;
+    return {
+      content: fullAnswer,
+      usage,
+      model,
+    };
   }
 
   // ==================== 消息持久化方法 ====================
@@ -516,11 +591,13 @@ export class ChatService {
   // 检查是否需要更新本轮会话摘要
   private async updateHistory(
     conversationId: string,
+    userId: string,
     onSystemMessage?: (message: string) => void,
   ): Promise<void> {
     /**
      * 调用者：普通/流式聊天完成后。少于 20 条新增消息直接结束；达到阈值时依次调用
-     * getConversationSummary → summarizeHistory → saveConversationSummary，并通过 onSystemMessage 通知前端。
+     * getConversationSummary → summarizeHistory → usageService.record → saveConversationSummary，
+     * 并通过 onSystemMessage 通知前端。userId 用于写入摘要调用对应的 token 用量记录。
      */
     const unsummarizedMessages =
       await this.getUnsummarizedMessages(conversationId);
@@ -535,10 +612,23 @@ export class ChatService {
       ? currentSummary.content
       : null;
 
-    const newSummary = await this.summarizeHistory(
+    const summaryResult = await this.summarizeHistory(
       unsummarizedMessages,
       previousSummary,
     );
+
+    await this.usageService.record({
+      userId,
+      conversationId,
+      requestType: 'SUMMARY',
+      model: summaryResult.model,
+      usage: summaryResult.usage,
+      estimateContext: {
+        messages: unsummarizedMessages,
+        outputText: summaryResult.content,
+      },
+    });
+
     const lastMessage =
       unsummarizedMessages[unsummarizedMessages.length - 1];
 
@@ -548,7 +638,7 @@ export class ChatService {
 
     await this.saveConversationSummary(
       conversationId,
-      newSummary,
+      summaryResult.content,
       lastMessage.sequence,
     );
 
@@ -561,8 +651,8 @@ export class ChatService {
   private async summarizeHistory(
     messages: { role: string; content: string }[],
     previousSummary: Prisma.JsonValue | null = null,
-  ): Promise<string> {
-    /** 调用者：updateHistory；组合旧摘要和新增消息后调用低温度 callModel，返回新的滚动摘要文本。 */
+  ): Promise<ModelResult> {
+    /** 调用者：updateHistory；组合旧摘要和新增消息后调用低温度 callModel，返回正文、usage 和模型名。 */
     const previousSummaryText = previousSummary
       ? `已有摘要：${JSON.stringify(previousSummary)}`
       : '目前没有已有摘要。';

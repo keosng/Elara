@@ -18,6 +18,19 @@ enum MessageStatus {
   FAILED
 }
 
+/// AI 调用类型：区分普通回复、SSE 流式回复和长对话滚动摘要，便于按请求来源统计 token
+enum AiRequestType {
+  CHAT
+  STREAM
+  SUMMARY
+}
+
+/// Token 数值来源：UPSTREAM 表示模型服务商返回的精确 usage，ESTIMATED 表示上游未返回时由 Service 估算
+enum AiUsageSource {
+  UPSTREAM
+  ESTIMATED
+}
+
 ///会话表
 model Conversation {
   id                  String               @id @default(uuid()) @db.Uuid ///会话唯一uuid
@@ -29,7 +42,9 @@ model Conversation {
   updatedAt           DateTime             @updatedAt @map("updated_at") ///会话最后一次更新的时间
   deletedAt           DateTime?            @map("deleted_at") ///记录会话被软删除的时间
 
-  messages Message[] ///关联消息表
+  messages       Message[] ///关联消息表
+  aiUsageRecords AiUsageRecord[] ///关联的 token 用量记录
+  usageSummary   ConversationUsageSummary? ///会话级 token 用量汇总
 
   @@index([userId, updatedAt])
   @@map("conversations")
@@ -45,7 +60,8 @@ model Message {
   content        String ///消息正文
   createdAt      DateTime      @default(now()) @map("created_at") ///消息的发送时间
 
-  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  conversation   Conversation    @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  aiUsageRecords AiUsageRecord[] ///关联的 token 用量记录
 
   @@index([conversationId, sequence]) ///消息索引 会话分类 sequence先后排序
   @@map("messages")
@@ -66,6 +82,58 @@ model ConversationSummary {
   @@map("conversation_summaries")
 }
 
+/// Token 用量记录表：每次模型调用成功后由 UsageService 写入，记录用户、会话、消息、请求类型和 token 数量
+model AiUsageRecord {
+  id             String        @id @default(uuid()) @db.Uuid ///用量记录唯一 ID
+  userId         String        @map("user_id") @db.Uuid ///触发本次模型调用的用户 ID，便于按用户统计
+  user           User          @relation(fields: [userId], references: [id], onDelete: Cascade) ///所属用户
+  conversationId String?       @map("conversation_id") @db.Uuid ///所属会话 ID；摘要等背景任务通常有关联会话，但不一定关联消息
+  conversation   Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull) ///关联会话
+  messageId      String?       @map("message_id") @db.Uuid ///对应 assistant 消息 ID；普通/流式回复可定位到具体消息
+  message        Message?      @relation(fields: [messageId], references: [id], onDelete: SetNull) ///关联消息
+  requestType    AiRequestType @map("request_type") ///本次调用的业务类型：CHAT / STREAM / SUMMARY
+  source         AiUsageSource @default(UPSTREAM) ///token 来源：上游精确值或本地估算值
+  model          String ///本次调用的模型名，便于后续按模型核对价格或统计
+  inputTokens    Int?          @map("input_tokens") ///输入 token 数，即 prompt_tokens
+  outputTokens   Int?          @map("output_tokens") ///输出 token 数，即 completion_tokens
+  totalTokens    Int?          @map("total_tokens") ///总 token 数，即 total_tokens
+  createdAt      DateTime      @default(now()) @map("created_at") ///用量记录写入时间
+
+  @@index([userId, createdAt]) ///按用户和时间查询用量的索引
+  @@index([conversationId, createdAt]) ///按会话和时间查询用量的索引
+  @@map("ai_usage_records")
+}
+
+/// 用户 Token 用量汇总表：每个用户一行，由 UsageService 在每次模型调用成功后原子累加
+model UserUsageSummary {
+  userId       String   @id @map("user_id") @db.Uuid ///用户唯一 ID，也是汇总记录主键
+  inputTokens  Int      @default(0) @map("input_tokens") ///该用户累计输入 token 数
+  outputTokens Int      @default(0) @map("output_tokens") ///该用户累计输出 token 数
+  totalTokens  Int      @default(0) @map("total_tokens") ///该用户累计总 token 数
+  callCount    Int      @default(0) @map("call_count") ///该用户累计模型调用次数
+  createdAt    DateTime @default(now()) @map("created_at") ///汇总记录创建时间
+  updatedAt    DateTime @updatedAt @map("updated_at") ///汇总记录最后一次累加时间
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade) ///所属用户
+
+  @@map("user_usage_summaries")
+}
+
+/// 会话 Token 用量汇总表：每个会话一行，由 UsageService 在每次模型调用成功后原子累加
+model ConversationUsageSummary {
+  conversationId String   @id @map("conversation_id") @db.Uuid ///会话唯一 ID，也是汇总记录主键
+  inputTokens    Int      @default(0) @map("input_tokens") ///该会话累计输入 token 数
+  outputTokens   Int      @default(0) @map("output_tokens") ///该会话累计输出 token 数
+  totalTokens    Int      @default(0) @map("total_tokens") ///该会话累计总 token 数
+  callCount      Int      @default(0) @map("call_count") ///该会话累计模型调用次数
+  createdAt      DateTime @default(now()) @map("created_at") ///汇总记录创建时间
+  updatedAt      DateTime @updatedAt @map("updated_at") ///汇总记录最后一次累加时间
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade) ///所属会话
+
+  @@map("conversation_usage_summaries")
+}
+
 /// 用户表
 model User {
   id           String   @id @default(uuid()) @db.Uuid /// 用户唯一 ID
@@ -75,8 +143,10 @@ model User {
   createdAt    DateTime @default(now()) @map("created_at") /// 注册时间
   updatedAt    DateTime @updatedAt @map("updated_at") /// 用户资料更新时间
 
-  conversations Conversation[] /// 用户拥有的会话
-  sessions      Session[]      /// 用户的登录会话
+  conversations  Conversation[] /// 用户拥有的会话
+  sessions       Session[] /// 用户的登录会话
+  aiUsageRecords AiUsageRecord[] /// 用户的 token 用量记录
+  usageSummary   UserUsageSummary? /// 用户的 token 用量汇总
 
   @@map("users")
 }

@@ -32,12 +32,13 @@ Elara 是一个剧情向 AI 陪伴游戏，而不是普通的通用 AI 聊天应
 - PostgreSQL Session 存储和 HttpOnly Cookie
 - SessionAuthGuard 鉴权
 - 会话和消息按当前用户隔离
+- Token 用量记录与汇总（`AiUsageRecord` + `UserUsageSummary` + `ConversationUsageSummary` + `UsageService`，记录 `CHAT`/`STREAM`/`SUMMARY` 三类模型调用）
 
 ## 当前未完成
 
 - Elara 人格、长期记忆、好感度和信任系统
 - 网页解谜、多结局和通关后陪伴模式
-- Token 使用监测
+- Token 用量统计查询与展示（记录层已完成）
 - 全流程统一跟踪日志
 
 用户注册、登录、Session 鉴权、前端注册、登录态展示和注销入口的基础链路已经完成；后续仍需补充 CSRF 防护。

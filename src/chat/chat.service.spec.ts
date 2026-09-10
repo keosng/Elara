@@ -1,10 +1,12 @@
 import { ChatService } from './chat.service';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
+import { UsageService } from '../usage/usage.service';
 
 describe('ChatService', () => {
   let service: ChatService;
   let fetchMock: jest.Spied<typeof fetch>;
+  let usageServiceMock: { record: jest.Mock };
 
   type PrismaMock = {
     $transaction: jest.Mock;
@@ -166,10 +168,14 @@ describe('ChatService', () => {
         return values[key];
       }),
     };
+    usageServiceMock = {
+      record: jest.fn().mockResolvedValue(undefined),
+    };
 
     service = new ChatService(
       prismaMock as unknown as PrismaService,
       configMock as unknown as ConfigService,
+      usageServiceMock as unknown as UsageService,
     );
     //类型是fetch,然后被jest监视
     fetchMock = jest.spyOn(global, 'fetch');
@@ -263,5 +269,103 @@ describe('ChatService', () => {
     );
 
     expect(deleted).toBe(false);
+  });
+
+  it('非流式回复应记录 CHAT 用量', async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        choices: [
+          {
+            message: {
+              content: '这是测试回答',
+            },
+          },
+        ],
+        usage: {
+          prompt_tokens: 10,
+          completion_tokens: 5,
+          total_tokens: 15,
+        },
+      }),
+    } as Response);
+
+    await service.getAIResponse(
+      'conversation-a',
+      '你好',
+      'test-user-id',
+    );
+
+    expect(usageServiceMock.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        requestType: 'CHAT',
+        conversationId: 'conversation-a',
+        messageId: expect.any(String),
+        model: 'test-model',
+        usage: {
+          prompt_tokens: 10,
+          completion_tokens: 5,
+          total_tokens: 15,
+        },
+      }),
+    );
+  });
+
+  it('流式回复应解析 usage 并记录 STREAM 用量', async () => {
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            'data: {"choices":[{"delta":{"content":"你好"}}]}\n\n',
+          ),
+        );
+        controller.enqueue(
+          encoder.encode(
+            'data: {"choices":[],"usage":{"prompt_tokens":700,"completion_tokens":16,"total_tokens":716}}\n\n',
+          ),
+        );
+        controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+        controller.close();
+      },
+    });
+
+    fetchMock.mockResolvedValue({
+      ok: true,
+      body: stream,
+    } as unknown as Response);
+
+    const chunks: string[] = [];
+    const systemMessages: string[] = [];
+
+    await service.streamAIResponse(
+      'conversation-a',
+      '你好',
+      'test-user-id',
+      (chunk) => {
+        chunks.push(chunk);
+      },
+      (message) => {
+        systemMessages.push(message);
+      },
+    );
+
+    expect(chunks.join('')).toBe('你好');
+    expect(systemMessages).toEqual([
+      'Token 用量：输入 700 · 输出 16 · 总计 716',
+    ]);
+    expect(usageServiceMock.record).toHaveBeenCalledWith(
+      expect.objectContaining({
+        requestType: 'STREAM',
+        conversationId: 'conversation-a',
+        messageId: expect.any(String),
+        model: 'test-model',
+        usage: {
+          prompt_tokens: 700,
+          completion_tokens: 16,
+          total_tokens: 716,
+        },
+      }),
+    );
   });
 });
