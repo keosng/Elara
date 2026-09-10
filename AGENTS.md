@@ -32,7 +32,7 @@ Elara 是一个剧情向 AI 陪伴游戏，而不是普通的通用 AI 聊天应
 - PostgreSQL Session 存储和 HttpOnly Cookie
 - SessionAuthGuard 鉴权
 - 会话和消息按当前用户隔离
-- Token 用量记录与汇总（`AiUsageRecord` + `UserUsageSummary` + `ConversationUsageSummary` + `UsageService`，记录 `CHAT`/`STREAM`/`SUMMARY` 三类模型调用）
+- Token 用量记录与汇总（支持精确、部分估算和全估算，记录 `CHAT`/`STREAM`/`SUMMARY` 三类模型调用）
 
 ## 当前未完成
 

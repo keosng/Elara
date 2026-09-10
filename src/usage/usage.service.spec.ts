@@ -77,6 +77,8 @@ describe('UsageService', () => {
         outputTokens: 16,
         totalTokens: 716,
         callCount: 1,
+        unknownInputCallCount: 0,
+        unknownOutputCallCount: 0,
       },
       update: {
         inputTokens: {
@@ -90,6 +92,12 @@ describe('UsageService', () => {
         },
         callCount: {
           increment: 1,
+        },
+        unknownInputCallCount: {
+          increment: 0,
+        },
+        unknownOutputCallCount: {
+          increment: 0,
         },
       },
     });
@@ -103,6 +111,8 @@ describe('UsageService', () => {
         outputTokens: 16,
         totalTokens: 716,
         callCount: 1,
+        unknownInputCallCount: 0,
+        unknownOutputCallCount: 0,
       },
       update: {
         inputTokens: {
@@ -116,6 +126,12 @@ describe('UsageService', () => {
         },
         callCount: {
           increment: 1,
+        },
+        unknownInputCallCount: {
+          increment: 0,
+        },
+        unknownOutputCallCount: {
+          increment: 0,
         },
       },
     });
@@ -157,6 +173,8 @@ describe('UsageService', () => {
         outputTokens: expect.any(Number),
         totalTokens: expect.any(Number),
         callCount: 1,
+        unknownInputCallCount: 0,
+        unknownOutputCallCount: 0,
       }),
       update: {
         inputTokens: {
@@ -170,6 +188,12 @@ describe('UsageService', () => {
         },
         callCount: {
           increment: 1,
+        },
+        unknownInputCallCount: {
+          increment: 0,
+        },
+        unknownOutputCallCount: {
+          increment: 0,
         },
       },
     });
@@ -189,5 +213,144 @@ describe('UsageService', () => {
 
     expect(prismaMock.userUsageSummary.upsert).toHaveBeenCalledTimes(1);
     expect(prismaMock.conversationUsageSummary.upsert).not.toHaveBeenCalled();
+  });
+
+  it('只有总量时直接累计总量，并记录输入输出未知', async () => {
+    await service.record({
+      userId: 'user-a',
+      conversationId: 'conversation-a',
+      requestType: 'STREAM',
+      model: 'test-model',
+      usage: {
+        total_tokens: 100,
+      },
+    });
+
+    expect(prismaMock.aiUsageRecord.create).toHaveBeenCalledWith({
+      data: {
+        userId: 'user-a',
+        conversationId: 'conversation-a',
+        messageId: null,
+        requestType: 'STREAM',
+        source: 'UPSTREAM',
+        model: 'test-model',
+        inputTokens: null,
+        outputTokens: null,
+        totalTokens: 100,
+      },
+    });
+    expect(prismaMock.userUsageSummary.upsert).toHaveBeenCalledWith({
+      where: {
+        userId: 'user-a',
+      },
+      create: {
+        userId: 'user-a',
+        inputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 100,
+        callCount: 1,
+        unknownInputCallCount: 1,
+        unknownOutputCallCount: 1,
+      },
+      update: {
+        inputTokens: {
+          increment: 0,
+        },
+        outputTokens: {
+          increment: 0,
+        },
+        totalTokens: {
+          increment: 100,
+        },
+        callCount: {
+          increment: 1,
+        },
+        unknownInputCallCount: {
+          increment: 1,
+        },
+        unknownOutputCallCount: {
+          increment: 1,
+        },
+      },
+    });
+    expect(prismaMock.conversationUsageSummary.upsert).toHaveBeenCalledWith({
+      where: {
+        conversationId: 'conversation-a',
+      },
+      create: {
+        conversationId: 'conversation-a',
+        inputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 100,
+        callCount: 1,
+        unknownInputCallCount: 1,
+        unknownOutputCallCount: 1,
+      },
+      update: {
+        inputTokens: {
+          increment: 0,
+        },
+        outputTokens: {
+          increment: 0,
+        },
+        totalTokens: {
+          increment: 100,
+        },
+        callCount: {
+          increment: 1,
+        },
+        unknownInputCallCount: {
+          increment: 1,
+        },
+        unknownOutputCallCount: {
+          increment: 1,
+        },
+      },
+    });
+  });
+
+  it('没有总量但输入输出都存在时应相加得到总量', async () => {
+    await service.record({
+      userId: 'user-a',
+      requestType: 'CHAT',
+      model: 'test-model',
+      usage: {
+        prompt_tokens: 20,
+        completion_tokens: 5,
+      },
+    });
+
+    expect(prismaMock.aiUsageRecord.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        source: 'UPSTREAM',
+        inputTokens: 20,
+        outputTokens: 5,
+        totalTokens: 25,
+      }),
+    });
+  });
+
+  it('只缺少部分字段时应保留上游值，并将来源标记为 PARTIAL', async () => {
+    await service.record({
+      userId: 'user-a',
+      requestType: 'CHAT',
+      model: 'test-model',
+      usage: {
+        prompt_tokens: 20,
+      },
+      estimateContext: {
+        messages: [{ role: 'user', content: '你好，Elara。' }],
+        outputText: '你好，我在这里。',
+      },
+    });
+
+    expect(prismaMock.aiUsageRecord.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        source: 'PARTIAL',
+        inputTokens: 20,
+        outputTokens: expect.any(Number),
+        totalTokens: expect.any(Number),
+      }),
+    });
   });
 });

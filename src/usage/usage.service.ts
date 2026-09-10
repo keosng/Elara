@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 
 /// ChatService 在模型调用成功后上报的用量信息。
-/// usage 是上游返回的精确值；estimateContext 是上游未返回 usage 时的估算兜底输入。
+/// usage 是上游返回的精确值；estimateContext 是上游部分或全部字段缺失时的估算兜底输入。
 type RecordAiUsageInput = {
   userId: string;
   conversationId?: string | null;
@@ -21,7 +21,7 @@ type RecordAiUsageInput = {
 };
 
 type ResolvedAiUsage = {
-  source: 'UPSTREAM' | 'ESTIMATED';
+  source: 'UPSTREAM' | 'PARTIAL' | 'ESTIMATED';
   inputTokens: number | null;
   outputTokens: number | null;
   totalTokens: number;
@@ -33,8 +33,8 @@ export class UsageService {
 
   /**
    * 调用者：ChatService.getAIResponse / streamAIResponse / updateHistory。
-   * 输入参数来自模型调用成功后解析出的 usage 和调用上下文；优先写入上游精确 token，
-   * 只有上游未返回 usage 时才使用 estimateContext 估算，并标记为 ESTIMATED。
+   * 输入参数来自模型调用成功后解析出的 usage 和调用上下文；上游字段按个采用，
+   * 总量缺失时可由输入和输出相加补出，只有缺失字段才使用 estimateContext 估算。
    * 成功时在同一事务中写入 AiUsageRecord、累加 UserUsageSummary，并在有关联会话时累加
    * ConversationUsageSummary；失败只记录日志，不阻断聊天主流程。
    */
@@ -45,6 +45,8 @@ export class UsageService {
         inputTokens: usage.inputTokens ?? 0,
         outputTokens: usage.outputTokens ?? 0,
         totalTokens: usage.totalTokens,
+        unknownInputCallCount: usage.inputTokens === null ? 1 : 0,
+        unknownOutputCallCount: usage.outputTokens === null ? 1 : 0,
       };
 
       await this.prisma.$transaction(async (tx) => {
@@ -84,6 +86,12 @@ export class UsageService {
             callCount: {
               increment: 1,
             },
+            unknownInputCallCount: {
+              increment: summaryIncrement.unknownInputCallCount,
+            },
+            unknownOutputCallCount: {
+              increment: summaryIncrement.unknownOutputCallCount,
+            },
           },
         });
 
@@ -110,6 +118,12 @@ export class UsageService {
               callCount: {
                 increment: 1,
               },
+              unknownInputCallCount: {
+                increment: summaryIncrement.unknownInputCallCount,
+              },
+              unknownOutputCallCount: {
+                increment: summaryIncrement.unknownOutputCallCount,
+              },
             },
           });
         }
@@ -119,26 +133,42 @@ export class UsageService {
     }
   }
 
-  // 优先采用上游返回的 usage；只有 total_tokens 有效时才视为精确记录，否则按上下文估算。
+  // 优先采用上游返回的 usage；总量有效时直接采用，缺失时再由输入、输出补出。
   private resolveUsage(input: RecordAiUsageInput): ResolvedAiUsage {
+    const upstreamInput = this.normalizeTokenCount(input.usage?.prompt_tokens);
+    const upstreamOutput = this.normalizeTokenCount(
+      input.usage?.completion_tokens,
+    );
     const upstreamTotal = this.normalizeTokenCount(input.usage?.total_tokens);
 
     if (upstreamTotal !== null) {
       return {
         source: 'UPSTREAM',
-        inputTokens: this.normalizeTokenCount(input.usage?.prompt_tokens),
-        outputTokens: this.normalizeTokenCount(input.usage?.completion_tokens),
+        inputTokens: upstreamInput,
+        outputTokens: upstreamOutput,
         totalTokens: upstreamTotal,
+      };
+    }
+
+    if (upstreamInput !== null && upstreamOutput !== null) {
+      return {
+        source: 'UPSTREAM',
+        inputTokens: upstreamInput,
+        outputTokens: upstreamOutput,
+        totalTokens: upstreamInput + upstreamOutput,
       };
     }
 
     const messages = input.estimateContext?.messages ?? [];
     const outputText = input.estimateContext?.outputText ?? '';
-    const inputTokens = this.estimateMessageTokens(messages);
-    const outputTokens = this.estimateTextTokens(outputText);
+    const inputTokens = upstreamInput ?? this.estimateMessageTokens(messages);
+    const outputTokens = upstreamOutput ?? this.estimateTextTokens(outputText);
 
     return {
-      source: 'ESTIMATED',
+      source:
+        upstreamInput === null && upstreamOutput === null
+          ? 'ESTIMATED'
+          : 'PARTIAL',
       inputTokens,
       outputTokens,
       totalTokens: inputTokens + outputTokens,

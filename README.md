@@ -45,7 +45,7 @@ Elara 是本作唯一的核心角色。她的性格、记忆和情绪会随着�
 - [x] 用户登录和密码认证
 - [x] Session 鉴权和 HttpOnly Cookie
 - [x] 按当前用户隔离会话和消息
-- [x] Token 用量记录与汇总（`AiUsageRecord` + `UserUsageSummary` + `ConversationUsageSummary` + `UsageService`）
+- [x] Token 用量记录与汇总（支持精确、部分估算和全估算，包含 `UserUsageSummary` 与 `ConversationUsageSummary`）
 
 项目正在从通用 AI 聊天应用，逐步发展为以角色关系和剧情探索为核心的 AI 互动故事。
 
