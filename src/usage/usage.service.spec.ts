@@ -7,9 +7,11 @@ type PrismaMock = {
   };
   userUsageSummary: {
     upsert: jest.Mock;
+    findUnique: jest.Mock;
   };
   conversationUsageSummary: {
     upsert: jest.Mock;
+    findMany: jest.Mock;
   };
   $transaction: jest.Mock;
 };
@@ -25,9 +27,11 @@ describe('UsageService', () => {
       },
       userUsageSummary: {
         upsert: jest.fn().mockResolvedValue({}),
+        findUnique: jest.fn(),
       },
       conversationUsageSummary: {
         upsert: jest.fn().mockResolvedValue({}),
+        findMany: jest.fn(),
       },
       $transaction: jest.fn(),
     };
@@ -37,6 +41,97 @@ describe('UsageService', () => {
     );
 
     service = new UsageService(prismaMock as unknown as PrismaService);
+  });
+
+  it('应返回用户和会话 Token 汇总', async () => {
+    prismaMock.userUsageSummary.findUnique.mockResolvedValue({
+      inputTokens: 120,
+      outputTokens: 30,
+      totalTokens: 150,
+      callCount: 2,
+      unknownInputCallCount: 0,
+      unknownOutputCallCount: 1,
+    });
+    prismaMock.conversationUsageSummary.findMany.mockResolvedValue([
+      {
+        conversationId: 'conversation-a',
+        inputTokens: 80,
+        outputTokens: 20,
+        totalTokens: 100,
+        callCount: 1,
+        unknownInputCallCount: 0,
+        unknownOutputCallCount: 0,
+      },
+    ]);
+
+    await expect(service.getUsageOverview('user-a')).resolves.toEqual({
+      user: {
+        inputTokens: 120,
+        outputTokens: 30,
+        totalTokens: 150,
+        callCount: 2,
+        unknownInputCallCount: 0,
+        unknownOutputCallCount: 1,
+      },
+      conversations: [
+        {
+          conversationId: 'conversation-a',
+          inputTokens: 80,
+          outputTokens: 20,
+          totalTokens: 100,
+          callCount: 1,
+          unknownInputCallCount: 0,
+          unknownOutputCallCount: 0,
+        },
+      ],
+    });
+    expect(prismaMock.userUsageSummary.findUnique).toHaveBeenCalledWith({
+      where: {
+        userId: 'user-a',
+      },
+      select: {
+        inputTokens: true,
+        outputTokens: true,
+        totalTokens: true,
+        callCount: true,
+        unknownInputCallCount: true,
+        unknownOutputCallCount: true,
+      },
+    });
+    expect(prismaMock.conversationUsageSummary.findMany).toHaveBeenCalledWith({
+      where: {
+        conversation: {
+          userId: 'user-a',
+          deletedAt: null,
+        },
+      },
+      select: {
+        conversationId: true,
+        inputTokens: true,
+        outputTokens: true,
+        totalTokens: true,
+        callCount: true,
+        unknownInputCallCount: true,
+        unknownOutputCallCount: true,
+      },
+    });
+  });
+
+  it('没有汇总记录时应返回全零用量', async () => {
+    prismaMock.userUsageSummary.findUnique.mockResolvedValue(null);
+    prismaMock.conversationUsageSummary.findMany.mockResolvedValue([]);
+
+    await expect(service.getUsageOverview('user-a')).resolves.toEqual({
+      user: {
+        inputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0,
+        callCount: 0,
+        unknownInputCallCount: 0,
+        unknownOutputCallCount: 0,
+      },
+      conversations: [],
+    });
   });
 
   it('应优先记录上游精确 usage，并累加用户和会话汇总', async () => {

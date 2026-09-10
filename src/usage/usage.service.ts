@@ -27,9 +27,67 @@ type ResolvedAiUsage = {
   totalTokens: number;
 };
 
+type UsageSummaryValues = {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  callCount: number;
+  unknownInputCallCount: number;
+  unknownOutputCallCount: number;
+};
+
 @Injectable()
 export class UsageService {
   constructor(private readonly prisma: PrismaService) {}
+
+  /**
+   * 调用者：UsageController.getUsageOverview，由已登录页面初始化和每轮聊天结束后的前端请求触发。
+   * 输入 userId 来自 SessionAuthGuard 写入的 request.session.userId，不能由前端覆盖。
+   * 查询用户汇总和当前用户未删除会话的汇总，并把没有汇总记录的新用户或新会话补成 0；
+   * 返回值由 UsageController 交给前端 Token 账簿使用。Prisma 查询失败会向上抛出，由 NestJS HTTP 层处理。
+   */
+  async getUsageOverview(userId: string) {
+    const [userSummary, conversationSummaries] = await Promise.all([
+      this.prisma.userUsageSummary.findUnique({
+        where: {
+          userId,
+        },
+        select: {
+          inputTokens: true,
+          outputTokens: true,
+          totalTokens: true,
+          callCount: true,
+          unknownInputCallCount: true,
+          unknownOutputCallCount: true,
+        },
+      }),
+      this.prisma.conversationUsageSummary.findMany({
+        where: {
+          conversation: {
+            userId,
+            deletedAt: null,
+          },
+        },
+        select: {
+          conversationId: true,
+          inputTokens: true,
+          outputTokens: true,
+          totalTokens: true,
+          callCount: true,
+          unknownInputCallCount: true,
+          unknownOutputCallCount: true,
+        },
+      }),
+    ]);
+
+    return {
+      user: this.normalizeUsageSummary(userSummary),
+      conversations: conversationSummaries.map((summary) => ({
+        conversationId: summary.conversationId,
+        ...this.normalizeUsageSummary(summary),
+      })),
+    };
+  }
 
   /**
    * 调用者：ChatService.getAIResponse / streamAIResponse / updateHistory。
@@ -131,6 +189,20 @@ export class UsageService {
     } catch (error) {
       console.error('Token 用量记录失败，不阻断聊天流程：', error);
     }
+  }
+
+  // 把数据库可能为空的汇总记录统一补成前端可直接展示的 0，避免每个调用点重复判空。
+  private normalizeUsageSummary(
+    summary: UsageSummaryValues | null,
+  ): UsageSummaryValues {
+    return {
+      inputTokens: summary?.inputTokens ?? 0,
+      outputTokens: summary?.outputTokens ?? 0,
+      totalTokens: summary?.totalTokens ?? 0,
+      callCount: summary?.callCount ?? 0,
+      unknownInputCallCount: summary?.unknownInputCallCount ?? 0,
+      unknownOutputCallCount: summary?.unknownOutputCallCount ?? 0,
+    };
   }
 
   // 优先采用上游返回的 usage；总量有效时直接采用，缺失时再由输入、输出补出。

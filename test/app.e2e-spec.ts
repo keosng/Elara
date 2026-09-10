@@ -6,6 +6,7 @@ import { AppModule } from './../src/app.module';
 import { ChatService } from './../src/chat/chat.service';
 import { PrismaService } from './../src/prisma/prisma.service';
 import { SessionAuthGuard } from './../src/auth/session-auth.guard';
+import { UsageService } from './../src/usage/usage.service';
 describe('AppController (e2e)', () => {
   let app: INestApplication<App>;
   const mockChatService = {
@@ -13,9 +14,11 @@ describe('AppController (e2e)', () => {
     deleteHistory: jest.fn(),
     createConversation: jest.fn(),
   };
+  const mockUsageService = {
+    getUsageOverview: jest.fn(),
+  };
 
   beforeEach(async () => {
-
     mockChatService.getAIResponse.mockReset();
     mockChatService.deleteHistory.mockReset();
     mockChatService.createConversation.mockReset();
@@ -23,12 +26,26 @@ describe('AppController (e2e)', () => {
     mockChatService.createConversation.mockResolvedValue(
       '63110219-38e4-4fc5-bbf1-c1be23632b25',
     );
+    mockUsageService.getUsageOverview.mockReset();
+    mockUsageService.getUsageOverview.mockResolvedValue({
+      user: {
+        inputTokens: 120,
+        outputTokens: 30,
+        totalTokens: 150,
+        callCount: 2,
+        unknownInputCallCount: 0,
+        unknownOutputCallCount: 0,
+      },
+      conversations: [],
+    });
 
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
     })
-    .overrideProvider(ChatService)
-    .useValue(mockChatService)
+      .overrideProvider(ChatService)
+      .useValue(mockChatService)
+      .overrideProvider(UsageService)
+      .useValue(mockUsageService)
       .overrideProvider(PrismaService)
       .useValue({})
       .overrideGuard(SessionAuthGuard)
@@ -60,6 +77,23 @@ describe('AppController (e2e)', () => {
       .expect(201)
       .expect({
         conversationId: '63110219-38e4-4fc5-bbf1-c1be23632b25',
+      });
+  });
+
+  it('/api/usage (GET) 应该返回当前用户用量概览', () => {
+    return request(app.getHttpServer())
+      .get('/api/usage')
+      .expect(200)
+      .expect({
+        user: {
+          inputTokens: 120,
+          outputTokens: 30,
+          totalTokens: 150,
+          callCount: 2,
+          unknownInputCallCount: 0,
+          unknownOutputCallCount: 0,
+        },
+        conversations: [],
       });
   });
 

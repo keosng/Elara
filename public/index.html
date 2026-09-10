@@ -63,6 +63,52 @@
             <span class="status-dot" aria-hidden="true"></span>
             当前会话
           </div>
+          <div class="token-tracker" id="tokenTracker" hidden>
+            <button
+              class="token-trigger"
+              id="tokenTrigger"
+              type="button"
+              aria-expanded="false"
+              aria-controls="tokenPanel"
+              title="Token 用量"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="12" cy="12" r="7.5"></circle>
+                <path d="M12 7.5v9M9.8 9.3c.7-.7 1.5-1 2.6-1 1.3 0 2.2.6 2.2 1.5 0 1-1 1.5-2.7 1.8-1.5.3-2.3.8-2.3 1.8 0 1 1 1.6 2.5 1.6 1.1 0 2-.3 2.8-1"></path>
+              </svg>
+              <span class="token-trigger-label">Token</span>
+              <strong class="token-trigger-value" id="tokenTriggerValue">0</strong>
+            </button>
+
+            <section
+              class="token-panel"
+              id="tokenPanel"
+              aria-label="Token 用量"
+              aria-hidden="true"
+              aria-live="polite"
+            >
+              <div class="token-panel-heading">
+                <p class="token-panel-kicker">Token 账簿</p>
+                <span class="token-panel-state" id="tokenPanelState">已同步</span>
+              </div>
+              <dl class="token-ledger-list">
+                <div class="token-ledger-row">
+                  <dt>用户累计</dt>
+                  <dd>
+                    <strong id="userTokenTotal">0</strong>
+                    <span>输入 <b id="userInputTokens">0</b> · 输出 <b id="userOutputTokens">0</b></span>
+                  </dd>
+                </div>
+                <div class="token-ledger-row">
+                  <dt>当前会话</dt>
+                  <dd>
+                    <strong id="conversationTokenTotal">0</strong>
+                    <span>输入 <b id="conversationInputTokens">0</b> · 输出 <b id="conversationOutputTokens">0</b></span>
+                  </dd>
+                </div>
+              </dl>
+            </section>
+          </div>
           <button
             class="account-mobile-button"
             id="mobileAccountButton"
@@ -176,8 +222,30 @@
     const logoutButton = document.getElementById('logoutButton');
     const loginModeButton = document.getElementById('loginModeButton');
     const registerModeButton = document.getElementById('registerModeButton');
+    const tokenTracker = document.getElementById('tokenTracker');
+    const tokenTrigger = document.getElementById('tokenTrigger');
+    const tokenPanel = document.getElementById('tokenPanel');
+    const tokenPanelState = document.getElementById('tokenPanelState');
+    const tokenTriggerValue = document.getElementById('tokenTriggerValue');
+    const userTokenTotal = document.getElementById('userTokenTotal');
+    const userInputTokens = document.getElementById('userInputTokens');
+    const userOutputTokens = document.getElementById('userOutputTokens');
+    const conversationTokenTotal = document.getElementById('conversationTokenTotal');
+    const conversationInputTokens = document.getElementById('conversationInputTokens');
+    const conversationOutputTokens = document.getElementById('conversationOutputTokens');
 
     let accountMode = 'login';
+    let tokenUsage = {
+      user: createEmptyTokenSummary(),
+      conversations: new Map(),
+    };
+    const tokenNumberFormatter = new Intl.NumberFormat('zh-CN');
+    const compactTokenNumberFormatter = new Intl.NumberFormat('zh-CN', {
+      notation: 'compact',
+      maximumFractionDigits: 1,
+    });
+    const numberAnimationFrames = new WeakMap();
+    const displayedNumberValues = new WeakMap();
 
 
     let currentUser = await getCurrentUser();
@@ -198,8 +266,9 @@
     }
 
     renderConversationList();
-    renderActiveConversation();
+    await renderActiveConversation();
     updateAccountButtons();
+    await refreshTokenUsage({ animate: false });
 
     sendButton.addEventListener('click', sendMessage);
     newConversationButton.addEventListener('click', createNewConversation);
@@ -213,6 +282,8 @@
     closeLoggedInButton.addEventListener('click', closeAccountDialog);
     accountForm.addEventListener('submit', handleAccountSubmit);
     logoutButton.addEventListener('click', handleLogout);
+    tokenTrigger.addEventListener('click', toggleTokenPanel);
+    document.addEventListener('click', handleDocumentClick);
     loginModeButton.addEventListener('click', () => setAccountMode('login'));
     registerModeButton.addEventListener('click', () => setAccountMode('register'));
     deleteDialog.addEventListener('cancel', (event) => {
@@ -246,11 +317,13 @@
     });
     document.addEventListener('keydown', (event) => {
       if (event.key === 'Escape') {
+        closeTokenPanel();
         closeSidebar();
       }
     });
 
     function openSidebar() {
+      closeTokenPanel();
       sidebar.classList.add('is-open');
       sidebarScrim.classList.add('is-visible');
       document.body.classList.add('sidebar-open');
@@ -276,6 +349,30 @@
       }
     }
 
+    function toggleTokenPanel() {
+      setTokenPanelOpen(!tokenTracker.classList.contains('is-open'));
+    }
+
+    function setTokenPanelOpen(open) {
+      tokenTracker.classList.toggle('is-open', open);
+      tokenTrigger.setAttribute('aria-expanded', String(open));
+      tokenPanel.setAttribute('aria-hidden', String(!open));
+    }
+
+    function closeTokenPanel() {
+      setTokenPanelOpen(false);
+    }
+
+    function handleDocumentClick(event) {
+      if (
+        tokenTracker.classList.contains('is-open') &&
+        event.target instanceof Node &&
+        !tokenTracker.contains(event.target)
+      ) {
+        closeTokenPanel();
+      }
+    }
+
     function createId() {
       if (window.crypto && window.crypto.randomUUID) {
         return window.crypto.randomUUID();
@@ -286,6 +383,7 @@
 
     function openAccountDialog() {
       // 调用者：侧栏账户按钮或移动端账户按钮；根据 currentUser 决定显示登录/注册表单或已登录面板。
+      closeTokenPanel();
       accountFeedback.hidden = true;
       accountFeedback.textContent = '';
       if (currentUser) {
@@ -348,6 +446,7 @@
         renderConversationList();
         await renderActiveConversation();
         updateAccountButtons();
+        await refreshTokenUsage({ animate: false });
         closeAccountDialog();
       } catch (error) {
         accountFeedback.textContent = error instanceof Error ? error.message : '操作失败';
@@ -365,10 +464,16 @@
         currentUser = null;
         conversations = [];
         activeConversationId = null;
+        tokenUsage = {
+          user: createEmptyTokenSummary(),
+          conversations: new Map(),
+        };
         stopPendingRefresh();
         messagesDiv.replaceChildren();
         saveState();
         renderConversationList();
+        closeTokenPanel();
+        renderTokenUsage({ animate: false });
         updateAccountButtons();
         closeAccountDialog();
       } catch (error) {
@@ -426,6 +531,10 @@
 
     function updateAccountButtons() {
       const name = currentUser?.displayName || '未登录';
+      tokenTracker.hidden = !currentUser;
+      if (!currentUser) {
+        closeTokenPanel();
+      }
       for (const button of [accountButton, mobileAccountButton]) {
         const avatar = button.querySelector('.account-avatar');
         if (avatar) avatar.textContent = name.slice(0, 1);
@@ -585,6 +694,149 @@ async function loadConversationMessages(conversationId) {
       return `${String(date.getMonth() + 1).padStart(2, '0')}/${String(date.getDate()).padStart(2, '0')}`;
     }
 
+    function createEmptyTokenSummary() {
+      return {
+        inputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0,
+        callCount: 0,
+        unknownInputCallCount: 0,
+        unknownOutputCallCount: 0,
+      };
+    }
+
+    function normalizeTokenSummary(summary) {
+      return {
+        inputTokens: Number(summary?.inputTokens) || 0,
+        outputTokens: Number(summary?.outputTokens) || 0,
+        totalTokens: Number(summary?.totalTokens) || 0,
+        callCount: Number(summary?.callCount) || 0,
+        unknownInputCallCount: Number(summary?.unknownInputCallCount) || 0,
+        unknownOutputCallCount: Number(summary?.unknownOutputCallCount) || 0,
+      };
+    }
+
+    function getConversationUsage(conversationId = activeConversationId) {
+      return (
+        tokenUsage.conversations.get(conversationId) ??
+        createEmptyTokenSummary()
+      );
+    }
+
+    function formatCompactToken(value) {
+      const number = Number(value) || 0;
+      return number < 1000
+        ? tokenNumberFormatter.format(number)
+        : compactTokenNumberFormatter.format(number);
+    }
+
+    function renderTokenUsage({ animate = false } = {}) {
+      const userSummary = normalizeTokenSummary(tokenUsage.user);
+      const conversationSummary = getConversationUsage();
+
+      animateTokenNumber(tokenTriggerValue, userSummary.totalTokens, animate);
+      animateTokenNumber(userTokenTotal, userSummary.totalTokens, animate);
+      animateTokenNumber(userInputTokens, userSummary.inputTokens, animate);
+      animateTokenNumber(userOutputTokens, userSummary.outputTokens, animate);
+      animateTokenNumber(
+        conversationTokenTotal,
+        conversationSummary.totalTokens,
+        animate,
+      );
+      animateTokenNumber(
+        conversationInputTokens,
+        conversationSummary.inputTokens,
+        animate,
+      );
+      animateTokenNumber(
+        conversationOutputTokens,
+        conversationSummary.outputTokens,
+        animate,
+      );
+    }
+
+    function animateTokenNumber(element, value, animate) {
+      const target = Math.max(0, Math.round(Number(value) || 0));
+      const from = displayedNumberValues.get(element) ?? 0;
+      const existingFrame = numberAnimationFrames.get(element);
+
+      if (existingFrame) {
+        cancelAnimationFrame(existingFrame);
+      }
+
+      const setValue = (nextValue) => {
+        displayedNumberValues.set(element, nextValue);
+        element.textContent = tokenNumberFormatter.format(nextValue);
+      };
+      const reduceMotion = window.matchMedia(
+        '(prefers-reduced-motion: reduce)',
+      ).matches;
+
+      if (!animate || reduceMotion || from === target) {
+        numberAnimationFrames.delete(element);
+        setValue(target);
+        return;
+      }
+
+      const duration = 720;
+      const startTime = performance.now();
+      const frame = (now) => {
+        const progress = Math.min(1, (now - startTime) / duration);
+        const eased = 1 - Math.pow(1 - progress, 3);
+        const current = Math.round(from + (target - from) * eased);
+        setValue(current);
+
+        if (progress < 1) {
+          numberAnimationFrames.set(element, requestAnimationFrame(frame));
+        } else {
+          numberAnimationFrames.delete(element);
+          setValue(target);
+        }
+      };
+
+      numberAnimationFrames.set(element, requestAnimationFrame(frame));
+    }
+
+    async function refreshTokenUsage({ animate = false } = {}) {
+      if (!currentUser) {
+        tokenUsage = {
+          user: createEmptyTokenSummary(),
+          conversations: new Map(),
+        };
+        renderTokenUsage({ animate: false });
+        return;
+      }
+
+      tokenPanelState.textContent = '同步中';
+
+      try {
+        const response = await fetch('/api/usage');
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+
+        const data = await response.json();
+        tokenUsage = {
+          user: normalizeTokenSummary(data.user),
+          conversations: new Map(
+            Array.isArray(data.conversations)
+              ? data.conversations.map((summary) => [
+                  summary.conversationId,
+                  normalizeTokenSummary(summary),
+                ])
+              : [],
+          ),
+        };
+
+        tokenPanelState.textContent = '已同步';
+        renderConversationList();
+        renderTokenUsage({ animate });
+      } catch (error) {
+        tokenPanelState.textContent = '暂未同步';
+        console.error('刷新 Token 用量失败：', error);
+      }
+    }
+
     function renderConversationList() {
       conversationList.replaceChildren();
       conversationCount.textContent = String(conversations.length);
@@ -606,11 +858,21 @@ async function loadConversationMessages(conversationId) {
           selectButton.innerHTML = `
             <span class="conversation-copy">
               <span class="conversation-title"></span>
-              <span class="conversation-meta"></span>
+              <span class="conversation-meta">
+                <span class="conversation-time"></span>
+                <span class="conversation-token"></span>
+              </span>
             </span>
           `;
           selectButton.querySelector('.conversation-title').textContent = conversation.title;
-          selectButton.querySelector('.conversation-meta').textContent = formatTime(conversation.updatedAt);
+          selectButton.querySelector('.conversation-time').textContent = formatTime(conversation.updatedAt);
+          const tokenElement = selectButton.querySelector('.conversation-token');
+          const conversationTokens = getConversationUsage(conversation.id).totalTokens;
+          tokenElement.textContent = `${formatCompactToken(conversationTokens)} token`;
+          tokenElement.setAttribute(
+            'aria-label',
+            `Token 用量 ${tokenNumberFormatter.format(conversationTokens)}`,
+          );
           selectButton.addEventListener('click', () => selectConversation(conversation.id));
 
           const deleteButton = document.createElement('button');
@@ -768,6 +1030,7 @@ async function renderActiveConversation() {
       closeSidebar();
       saveState();
       renderConversationList();
+      renderTokenUsage({ animate: false });
       renderActiveConversation();
       input.focus();
     }
@@ -784,8 +1047,13 @@ async function renderActiveConversation() {
       const conversation = await createConversation();
       conversations.unshift(conversation);
       activeConversationId = conversation.id;
+      tokenUsage.conversations.set(
+        conversation.id,
+        createEmptyTokenSummary(),
+      );
       saveState();
       renderConversationList();
+      renderTokenUsage({ animate: false });
       renderActiveConversation();
       input.focus();
     }
@@ -852,17 +1120,23 @@ async function renderActiveConversation() {
       }
 
       conversations = conversations.filter((item) => item.id !== conversationId);
+      tokenUsage.conversations.delete(conversationId);
 
       if (conversations.length === 0) {
         const replacement = await createConversation();
         conversations.push(replacement);
         activeConversationId = replacement.id;
+        tokenUsage.conversations.set(
+          replacement.id,
+          createEmptyTokenSummary(),
+        );
       } else if (conversationId === activeConversationId) {
         activeConversationId = conversations[0].id;
       }
 
       saveState();
       renderConversationList();
+      renderTokenUsage({ animate: false });
       renderActiveConversation();
       input.focus();
     }
@@ -954,6 +1228,7 @@ async function renderActiveConversation() {
         let pendingText = '';
         let displayedText = '';
         let receivedText = '';
+        let roundCompleted = false;
         const receivedSystemMessages = [];
         let typing = false;
         const stopThinking = () => {
@@ -1023,6 +1298,7 @@ async function renderActiveConversation() {
         receivedSystemMessages.forEach((systemMessage) => {
           recordSystemMessage(conversationId, systemMessage);
         });
+        roundCompleted = true;
       } catch (error) {
         stopThinkingAnimation();
         aiMsgDiv.classList.remove('thinking');
@@ -1030,6 +1306,9 @@ async function renderActiveConversation() {
       } finally {
         setSendingState(false);
         input.focus();
+        if (roundCompleted) {
+          void refreshTokenUsage({ animate: true });
+        }
       }
     }
 

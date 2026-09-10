@@ -31,14 +31,14 @@ body {
   overflow: hidden;
   padding: 24px;
   color: var(--text);
-  font-family: Georgia, "Times New Roman", serif;
+  font-family: Georgia, 'Times New Roman', serif;
   background:
     linear-gradient(180deg, rgba(7, 6, 9, 0.92), rgba(17, 13, 18, 0.98)),
     linear-gradient(145deg, var(--bg-0), var(--bg-1));
 }
 
 body::before {
-  content: "";
+  content: '';
   position: fixed;
   inset: 0;
   pointer-events: none;
@@ -197,7 +197,11 @@ input:focus-visible {
   border: 1px solid rgba(240, 208, 145, 0.34);
   border-radius: 8px;
   color: #fff1d1;
-  background: linear-gradient(180deg, rgba(122, 93, 49, 0.98), rgba(77, 53, 28, 0.98));
+  background: linear-gradient(
+    180deg,
+    rgba(122, 93, 49, 0.98),
+    rgba(77, 53, 28, 0.98)
+  );
   box-shadow: 0 10px 22px rgba(0, 0, 0, 0.28);
   cursor: pointer;
   transition:
@@ -336,10 +340,32 @@ input:focus-visible {
 }
 
 .conversation-meta {
-  display: block;
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
   margin-top: 4px;
   font-size: 0.72rem;
   letter-spacing: 0;
+}
+
+.conversation-time {
+  flex: 0 0 auto;
+}
+
+.conversation-token {
+  min-width: 0;
+  overflow: hidden;
+  color: rgba(200, 178, 147, 0.82);
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conversation-token::before {
+  margin-right: 5px;
+  color: rgba(200, 178, 147, 0.42);
+  content: '·';
 }
 
 .conversation-delete {
@@ -349,7 +375,9 @@ input:focus-visible {
   color: var(--muted);
   font-size: 0.74rem;
   opacity: 0;
-  transition: color 180ms ease, opacity 180ms ease;
+  transition:
+    color 180ms ease,
+    opacity 180ms ease;
 }
 
 .conversation-item:hover .conversation-delete,
@@ -375,8 +403,11 @@ input:focus-visible {
   border: 1px solid rgba(225, 184, 111, 0.34);
   border-radius: 8px;
   color: var(--text);
-  background:
-    linear-gradient(145deg, rgba(47, 35, 38, 0.98), rgba(21, 17, 22, 0.99));
+  background: linear-gradient(
+    145deg,
+    rgba(47, 35, 38, 0.98),
+    rgba(21, 17, 22, 0.99)
+  );
   box-shadow:
     0 24px 60px rgba(0, 0, 0, 0.58),
     inset 0 1px 0 rgba(255, 242, 209, 0.06);
@@ -389,8 +420,11 @@ input:focus-visible {
   border: 1px solid rgba(225, 184, 111, 0.34);
   border-radius: 8px;
   color: var(--text);
-  background:
-    linear-gradient(145deg, rgba(47, 35, 38, 0.98), rgba(21, 17, 22, 0.99));
+  background: linear-gradient(
+    145deg,
+    rgba(47, 35, 38, 0.98),
+    rgba(21, 17, 22, 0.99)
+  );
   box-shadow:
     0 24px 60px rgba(0, 0, 0, 0.58),
     inset 0 1px 0 rgba(255, 242, 209, 0.06);
@@ -482,7 +516,9 @@ input:focus-visible {
   border-radius: 7px;
   color: var(--text);
   background: rgba(19, 16, 20, 0.96);
-  transition: border-color 180ms ease, box-shadow 180ms ease;
+  transition:
+    border-color 180ms ease,
+    box-shadow 180ms ease;
 }
 
 .account-form input:focus {
@@ -501,7 +537,11 @@ input:focus-visible {
 .account-submit {
   color: #fff1d1;
   border-color: rgba(240, 208, 145, 0.34);
-  background: linear-gradient(180deg, rgba(122, 93, 49, 0.98), rgba(77, 53, 28, 0.98));
+  background: linear-gradient(
+    180deg,
+    rgba(122, 93, 49, 0.98),
+    rgba(77, 53, 28, 0.98)
+  );
 }
 
 .account-mobile-button {
@@ -682,7 +722,9 @@ input:focus-visible {
   color: var(--accent-strong);
   background: rgba(19, 16, 20, 0.46);
   cursor: pointer;
-  transition: background-color 180ms ease, border-color 180ms ease;
+  transition:
+    background-color 180ms ease,
+    border-color 180ms ease;
 }
 
 .sidebar-toggle svg {
@@ -707,6 +749,171 @@ input:focus-visible {
   display: flex;
   align-items: flex-start;
   gap: 16px;
+}
+
+.token-tracker {
+  position: relative;
+}
+
+.token-tracker[hidden] {
+  display: none;
+}
+
+.token-trigger {
+  display: inline-flex;
+  min-height: 36px;
+  align-items: center;
+  gap: 7px;
+  padding: 0 10px 0 8px;
+  border: 1px solid rgba(217, 184, 126, 0.2);
+  border-radius: 7px;
+  color: var(--accent-strong);
+  background: rgba(19, 16, 20, 0.5);
+  cursor: pointer;
+  transition:
+    border-color 180ms ease,
+    background-color 180ms ease,
+    transform 180ms ease;
+}
+
+.token-trigger svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.6;
+}
+
+.token-trigger:hover,
+.token-trigger[aria-expanded='true'] {
+  border-color: rgba(225, 184, 111, 0.46);
+  background: rgba(91, 67, 42, 0.38);
+  transform: translateY(-1px);
+}
+
+.token-trigger-label {
+  color: var(--muted);
+  font-size: 0.65rem;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+}
+
+.token-trigger-value {
+  max-width: 92px;
+  overflow: hidden;
+  color: var(--accent-strong);
+  font-size: 0.82rem;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.token-panel {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  z-index: 40;
+  width: min(310px, calc(100vw - 32px));
+  padding: 18px;
+  border: 1px solid rgba(225, 184, 111, 0.28);
+  border-radius: 8px;
+  color: var(--text);
+  background: linear-gradient(
+    145deg,
+    rgba(47, 35, 38, 0.98),
+    rgba(21, 17, 22, 0.99)
+  );
+  box-shadow:
+    0 22px 46px rgba(0, 0, 0, 0.5),
+    inset 0 1px 0 rgba(255, 242, 209, 0.055);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateY(-6px) scale(0.985);
+  transform-origin: top right;
+  transition:
+    opacity 180ms ease,
+    transform 240ms cubic-bezier(0.16, 1, 0.3, 1),
+    visibility 0s linear 240ms;
+}
+
+.token-tracker.is-open .token-panel {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform: translateY(0) scale(1);
+  transition-delay: 0s;
+}
+
+.token-panel-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid rgba(217, 184, 126, 0.14);
+}
+
+.token-panel-kicker {
+  margin: 0;
+  color: var(--accent-strong);
+  font-size: 0.72rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.token-panel-state {
+  color: var(--muted);
+  font-size: 0.68rem;
+}
+
+.token-ledger-list {
+  margin: 0;
+}
+
+.token-ledger-row {
+  display: grid;
+  grid-template-columns: 74px minmax(0, 1fr);
+  gap: 12px;
+  padding: 13px 0;
+}
+
+.token-ledger-row + .token-ledger-row {
+  border-top: 1px solid rgba(217, 184, 126, 0.11);
+}
+
+.token-ledger-row dt {
+  padding-top: 2px;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.token-ledger-row dd {
+  display: grid;
+  min-width: 0;
+  justify-items: end;
+  gap: 3px;
+  margin: 0;
+}
+
+.token-ledger-row dd strong {
+  color: var(--text);
+  font-size: 1.04rem;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+
+.token-ledger-row dd span {
+  color: rgba(200, 178, 147, 0.76);
+  font-size: 0.68rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.token-ledger-row dd b {
+  color: var(--accent);
+  font-weight: 600;
 }
 
 .chat-header h1 {
@@ -756,7 +963,11 @@ input:focus-visible {
 }
 
 #messages::-webkit-scrollbar-thumb {
-  background: linear-gradient(180deg, rgba(225, 184, 111, 0.66), rgba(144, 104, 55, 0.82));
+  background: linear-gradient(
+    180deg,
+    rgba(225, 184, 111, 0.66),
+    rgba(144, 104, 55, 0.82)
+  );
   border: 2px solid rgba(16, 13, 17, 0.92);
   border-radius: 999px;
 }
@@ -776,14 +987,22 @@ input:focus-visible {
 .user {
   align-self: flex-end;
   color: #f7ead3;
-  background: linear-gradient(180deg, rgba(102, 70, 41, 0.95), rgba(76, 50, 28, 0.98));
+  background: linear-gradient(
+    180deg,
+    rgba(102, 70, 41, 0.95),
+    rgba(76, 50, 28, 0.98)
+  );
   border-color: rgba(236, 201, 140, 0.22);
 }
 
 .assistant {
   align-self: flex-start;
   color: #edf4e9;
-  background: linear-gradient(180deg, rgba(31, 47, 40, 0.96), rgba(20, 27, 24, 0.99));
+  background: linear-gradient(
+    180deg,
+    rgba(31, 47, 40, 0.96),
+    rgba(20, 27, 24, 0.99)
+  );
   border-color: rgba(162, 197, 173, 0.18);
 }
 
@@ -826,7 +1045,10 @@ input:focus-visible {
   color: var(--text);
   background: rgba(19, 16, 20, 0.96);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
-  transition: border-color 180ms ease, box-shadow 180ms ease, opacity 180ms ease;
+  transition:
+    border-color 180ms ease,
+    box-shadow 180ms ease,
+    opacity 180ms ease;
 }
 
 #userInput::placeholder {
@@ -894,12 +1116,15 @@ input:focus-visible {
     height: 100%;
     min-height: 100%;
     gap: 16px;
-    padding: max(22px, env(safe-area-inset-top)) 16px max(18px, env(safe-area-inset-bottom));
+    padding: max(22px, env(safe-area-inset-top)) 16px
+      max(18px, env(safe-area-inset-bottom));
     border-radius: 0 8px 8px 0;
     transform: translateX(-102%);
     visibility: hidden;
     pointer-events: none;
-    transition: transform 240ms cubic-bezier(0.16, 1, 0.3, 1), visibility 0s linear 240ms;
+    transition:
+      transform 240ms cubic-bezier(0.16, 1, 0.3, 1),
+      visibility 0s linear 240ms;
   }
 
   .sidebar.is-open {
@@ -918,7 +1143,9 @@ input:focus-visible {
     opacity: 0;
     visibility: hidden;
     pointer-events: none;
-    transition: opacity 220ms ease, visibility 0s linear 220ms;
+    transition:
+      opacity 220ms ease,
+      visibility 0s linear 220ms;
   }
 
   .sidebar-scrim.is-visible {
@@ -936,7 +1163,7 @@ input:focus-visible {
 
   .chat-header {
     display: grid;
-    grid-template-columns: 44px minmax(0, 1fr) 44px;
+    grid-template-columns: 44px minmax(0, 1fr) auto;
     align-items: center;
     gap: 12px;
     padding: max(14px, env(safe-area-inset-top)) 16px 14px;
@@ -951,6 +1178,7 @@ input:focus-visible {
   }
 
   .chat-header-actions {
+    gap: 8px;
     justify-content: flex-end;
   }
 
@@ -962,6 +1190,20 @@ input:focus-visible {
     display: block;
   }
 
+  .token-trigger {
+    min-height: 44px;
+    padding: 0 9px 0 8px;
+  }
+
+  .token-panel {
+    position: fixed;
+    top: calc(max(14px, env(safe-area-inset-top)) + 62px);
+    right: 12px;
+    left: 12px;
+    width: auto;
+    transform-origin: top center;
+  }
+
   .conversation-list {
     max-height: none;
   }
@@ -969,7 +1211,6 @@ input:focus-visible {
   .account-button {
     display: none;
   }
-
 }
 
 @media (max-width: 560px) {
@@ -983,6 +1224,14 @@ input:focus-visible {
 
   .chat-status {
     font-size: 0.74rem;
+  }
+
+  .token-trigger-label {
+    display: none;
+  }
+
+  .token-trigger {
+    gap: 5px;
   }
 
   #messages {
@@ -1010,5 +1259,9 @@ input:focus-visible {
     scroll-behavior: auto !important;
     transition-duration: 0.01ms !important;
     animation-duration: 0.01ms !important;
+  }
+
+  .token-panel {
+    transition-delay: 0s !important;
   }
 }
